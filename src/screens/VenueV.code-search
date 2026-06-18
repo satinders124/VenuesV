@@ -1,0 +1,45 @@
+# Query: VenueV
+# ContextLines: 1
+
+11 results - 6 files
+
+app.json:
+  2    "expo": {
+  3:     "name": "VenuesV",
+  4:     "slug": "VenuesV",
+  5      "version": "1.0.0",
+
+package-lock.json:
+  1  {
+  2:   "name": "venuesv",
+  3    "version": "1.0.0",
+
+  7      "": {
+  8:       "name": "venuesv",
+  9        "version": "1.0.0",
+
+package.json:
+  1  {
+  2:   "name": "venuesv",
+  3    "version": "1.0.0",
+
+src/config/firebase.ts:
+   8    apiKey: "AIzaSyDFWaRNJS4RTM2_9b0HDSTeP-ToRe2rXZw",
+   9:   authDomain: "venuev-b24c2.firebaseapp.com",
+  10:   projectId: "venuev-b24c2",
+  11:   storageBucket: "venuev-b24c2.firebasestorage.app",
+  12    messagingSenderId: "192243799253",
+
+src/screens/LoginScreen.tsx:
+  44              </View>
+  45:             <Text style={styles.logoText}>VenuesV</Text>
+  46              <Text style={styles.logoSub}>Venue Operations Platform</Text>
+
+src/screens/MoreScreen.tsx:
+  19  const CLEANER_MENU = [
+  20:   { icon:'help-circle-outline', label:'Help',         desc:'How to use VenuesV',                color:'#2c7ef7', screen:null },
+  21    { icon:'shield-outline',      label:'Privacy',      desc:'Data and privacy settings',        color:'#6e7a8a', screen:null },
+
+  98  
+  99:         <Text style={s.version}>VenueV v1.0.0</Text>
+  100  
