@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView,
   TouchableOpacity, TextInput, ScrollView,
   Alert, ActivityIndicator, KeyboardAvoidingView, Platform
 } from 'react-native';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
@@ -34,22 +34,72 @@ export default function AddVenueScreen() {
   const [type,     setType]     = useState('tavern');
   const [saving,   setSaving]   = useState(false);
 
+  // For managers: need their existing venue's ownerId + that venue's own
+  // doc ID, so the new venue can be created under the same owner (and the
+  // Firestore rule can verify the chain). Owners don't need this — they
+  // just use their own uid.
+  const [managerOwnerId, setManagerOwnerId]       = useState<string | null>(null);
+  const [managerExistingVenueId, setManagerExistingVenueId] = useState<string | null>(null);
+  const [resolvingOwner, setResolvingOwner]       = useState(false);
+
+  useEffect(() => {
+    if (user?.role !== 'manager') return;
+    const myVenueName = user?.venue || (user as any)?.venues?.[0];
+    if (!myVenueName) return;
+
+    setResolvingOwner(true);
+    (async () => {
+      try {
+        const snap = await getDocs(
+          query(collection(db, 'venues'), where('name', '==', myVenueName))
+        );
+        if (!snap.empty) {
+          const venueDoc = snap.docs[0];
+          setManagerOwnerId(venueDoc.data().ownerId || null);
+          setManagerExistingVenueId(venueDoc.id);
+        }
+      } catch (err) {
+        console.log('Could not resolve manager owner:', err);
+      }
+      setResolvingOwner(false);
+    })();
+  }, [user]);
+
   const addVenue = async () => {
     if (!name || !suburb) {
       Alert.alert('Missing fields', 'Please enter venue name and suburb.');
       return;
     }
+
+    const isManager = user?.role === 'manager';
+    if (isManager && (!managerOwnerId || !managerExistingVenueId)) {
+      Alert.alert(
+        'Cannot add venue yet',
+        'We could not determine which business you work for. Make sure you are assigned to at least one venue first, then try again.'
+      );
+      return;
+    }
+
     setSaving(true);
     try {
-      // Add venue
-      const venueRef = await addDoc(collection(db, 'venues'), {
+      const venuePayload: any = {
         name,
         suburb,
         type,
         score: 100,
-        ownerId: user?.uid,
+        ownerId: isManager ? managerOwnerId : user?.uid,
         createdAt: serverTimestamp(),
-      });
+      };
+      // Required by the Firestore rule to verify a manager's create request —
+      // not a meaningful field on the venue itself, but must be present at
+      // create time. Removed immediately after via a follow-up write isn't
+      // necessary; Firestore rules only check request.resource.data at write
+      // time, so this field DOES get stored. That's fine — harmless metadata.
+      if (isManager) {
+        venuePayload.existingVenueId = managerExistingVenueId;
+      }
+
+      const venueRef = await addDoc(collection(db, 'venues'), venuePayload);
 
       // Auto-create default zones for this venue type
       const defaultZones = ZONES_PRESETS[type] || ZONES_PRESETS.other;
@@ -97,6 +147,13 @@ export default function AddVenueScreen() {
             </TouchableOpacity>
             <Text style={styles.heading}>Add New Venue</Text>
           </View>
+
+          {user?.role === 'manager' && resolvingOwner && (
+            <View style={{flexDirection:'row',alignItems:'center',gap:8,marginBottom:16}}>
+              <ActivityIndicator color="#00c896" size="small" />
+              <Text style={{fontSize:12,color:'#6e7a8a'}}>Checking your business...</Text>
+            </View>
+          )}
 
           {/* Venue type */}
           <Text style={styles.inputLabel}>VENUE TYPE</Text>
@@ -151,7 +208,11 @@ export default function AddVenueScreen() {
           </View>
 
           {/* Submit */}
-          <TouchableOpacity style={styles.addBtn} onPress={addVenue} disabled={saving}>
+          <TouchableOpacity
+            style={[styles.addBtn, (saving || (user?.role==='manager' && resolvingOwner)) && {opacity:0.6}]}
+            onPress={addVenue}
+            disabled={saving || (user?.role==='manager' && resolvingOwner)}
+          >
             {saving
               ? <ActivityIndicator color="#000" />
               : <Text style={styles.addBtnText}>Add Venue →</Text>

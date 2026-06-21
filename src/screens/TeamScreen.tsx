@@ -4,17 +4,17 @@ import {
   TouchableOpacity, Modal, TextInput, Alert, ActivityIndicator,
   KeyboardAvoidingView, Platform, ScrollView
 } from 'react-native';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
-import { collection, onSnapshot, doc, deleteDoc, addDoc, setDoc, getDocs, query, where, updateDoc } from 'firebase/firestore';
-import { auth, db } from '../config/firebase';
+import { collection, onSnapshot, doc, getDocs, query, where, updateDoc } from 'firebase/firestore';
+import { db } from '../config/firebase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { RefreshControl } from 'react-native';
 
+const INVITE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/inviteTeamMember';
 
-type Member = { id:string; name:string; email:string; role:string; venue:string; venues?:string[]; };
-type Venue  = { id:string; name:string; };
+type Member = { id:string; uid?:string; name:string; email:string; role:string; venue:string; venues?:string[]; };
+type Venue  = { id:string; name:string; ownerId?:string; };
 type TabType = 'manager'|'cleaner'|'staff';
 
 const ROLE_COLOR: Record<string,string> = {
@@ -45,12 +45,13 @@ export default function TeamScreen() {
   const [email,     setEmail]     = useState('');
   const [role,      setRole]      = useState<TabType>('manager');
   const [venueId,   setVenueId]   = useState('');
+  const [venueSearch, setVenueSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-const onRefresh = async () => {
-  setRefreshing(true);
-  setTimeout(() => setRefreshing(false), 1000);
-};
+  const onRefresh = async () => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 1000);
+  };
 
   useEffect(() => {
     const u1 = onSnapshot(collection(db,'users'), snap => {
@@ -58,129 +59,95 @@ const onRefresh = async () => {
       setLoading(false);
     });
     const u2 = onSnapshot(collection(db,'venues'), snap => {
-      const v = snap.docs.map(d=>({id:d.id,...d.data()})) as Venue[];
-      setVenues(v);
-      if (v.length > 0) setVenueId(v[0].id);
+      const all = snap.docs.map(d=>({id:d.id,...d.data()})) as Venue[];
+      // Only show venues owned by this owner (or the manager's single venue)
+      const myVenues = user?.role==='owner'
+        ? all.filter(v=>v.ownerId===user.uid)
+        : all.filter(v=>v.name===user?.venue);
+      setVenues(myVenues);
+      if (myVenues.length > 0 && !venueId) setVenueId(myVenues[0].id);
     });
     return ()=>{u1();u2();};
   },[]);
 
   const openInvite = () => {
-    setRole(activeTab); setName(''); setEmail('');
+    setRole(activeTab); setName(''); setEmail(''); setVenueSearch('');
     setModal(true);
   };
 
+  // ── INVITE — now calls the inviteTeamMember Cloud Function (Admin SDK).
+  // This NEVER touches the caller's (owner/manager's) auth session, unlike
+  // the old client-side createUserWithEmailAndPassword which silently
+  // logged the owner out and into the new staff account.
   const inviteMember = async () => {
-  if (!name||!email) { Alert.alert('Missing','Enter name and email.'); return; }
-  setInviting(true);
-  try {
-    // Check if user already exists in Firestore
-    const existing = await getDocs(
-      query(collection(db,'users'), where('email','==',email))
-    );
+    if (!name||!email) { Alert.alert('Missing','Enter name and email.'); return; }
+    const venueName = venues.find(v=>v.id===venueId)?.name || '';
+    if (!venueName) { Alert.alert('Missing','Select a venue.'); return; }
 
-    let uid = '';
-
-    if (!existing.empty) {
-  const existingDoc = existing.docs[0];
-  const existingData = existingDoc.data();
-  const newVenueName = venues.find(v=>v.id===venueId)?.name||'';
-  const currentVenue = existingData.venue;
-
-  if (currentVenue && currentVenue !== newVenueName) {
-    Alert.alert(
-      'Already Assigned',
-      `${existingData.name} is currently at ${currentVenue}. What would you like to do?`,
-      [
-        {text:'Cancel', style:'cancel', onPress:()=>setInviting(false)},
-        {text:'Add to Both', onPress: async()=>{
-          const currentVenues: string[] = existingData.venues || [currentVenue];
-          if (!currentVenues.includes(newVenueName)) currentVenues.push(newVenueName);
-          await updateDoc(doc(db,'users',existingDoc.id), {
-            venues: currentVenues,
-            venue: currentVenue,
-            role,
-          });
-          setModal(false); setName(''); setEmail('');
-          Alert.alert('Done',`${existingData.name} added to both venues.`);
-          setInviting(false);
-        }},
-        {text:'Move', onPress: async()=>{
-          await updateDoc(doc(db,'users',existingDoc.id), {
-            venue: newVenueName,
-            venues: [newVenueName],
-            role,
-          });
-          setModal(false); setName(''); setEmail('');
-          Alert.alert('Done',`${existingData.name} moved to ${newVenueName}.`);
-          setInviting(false);
-        }},
-      ]
-    );
-    return;
-  }
-
-  await updateDoc(doc(db,'users',existingDoc.id), {
-    role,
-    venue: newVenueName,
-    venues: [newVenueName],
-  });
-  uid = existingDoc.data().uid;
-} else {
-      // Try creating new Firebase Auth account
-      try {
-        const tmp = 'Tmp'+Math.random().toString(36).slice(2,8)+'!';
-        const cred = await createUserWithEmailAndPassword(auth,email,tmp);
-        uid = cred.user.uid;
-        await setDoc(doc(db,'users',uid),{
-          uid, name, email, role,
-          venue:venues.find(v=>v.id===venueId)?.name||'',
-          tempPassword: tmp,
-        });
-      } catch(authErr: any) {
-        if (authErr.code === 'auth/email-already-in-use') {
-          // Auth account exists but no Firestore doc — can't get uid client-side.
-          // Show error asking owner to search for this user via existing member search.
-          Alert.alert(
-            'Already Registered',
-            `${email} already has an account. Use the existing member search to assign them to this venue instead.`
-          );
-        } else {
-          throw authErr;
-        }
-      }
-    }
-    setModal(false); setName(''); setEmail('');
-    Alert.alert('Done', `${name} has been added.`);
-  } catch(err:any){ Alert.alert('Error',err.message); }
-  setInviting(false);
-};
-
-  const removeMember = (m:Member) => {
-  Alert.alert('Remove Member',`Remove ${m.name} from ${m.venue}?`,[
-    {text:'Cancel',style:'cancel'},
-    {text:'Remove',style:'destructive',onPress:async()=>{
-      const currentVenues: string[] = m.venues || (m.venue ? [m.venue] : []);
-      const updatedVenues = currentVenues.filter(v=>v!==m.venue);
-      await updateDoc(doc(db,'users',m.id),{
-        venues: updatedVenues,
-        venue: updatedVenues.length>0 ? updatedVenues[0] : '',
+    setInviting(true);
+    try {
+      const resp = await fetch(INVITE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email, name, role, venue: venueName,
+          callerUid: user?.uid,
+        }),
       });
-    }},
-  ]);
-};
+      const result = await resp.json();
+      if (!resp.ok) throw new Error(result.error || 'Failed to invite');
+
+      setModal(false); setName(''); setEmail('');
+      Alert.alert(
+        'Done',
+        result.existed
+          ? `${name} has been assigned to ${venueName}.`
+          : `${name} will receive an email with login details.`
+      );
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to invite team member.');
+    }
+    setInviting(false);
+  };
+
+  const removeMember = (m:Member, fromVenueName?: string) => {
+    const targetVenue = fromVenueName || m.venue;
+    Alert.alert('Remove Member',`Remove ${m.name} from ${targetVenue}?`,[
+      {text:'Cancel',style:'cancel'},
+      {text:'Remove',style:'destructive',onPress:async()=>{
+        const docId = m.uid || m.id;
+        const currentVenues: string[] = m.venues || (m.venue ? [m.venue] : []);
+        const updatedVenues = currentVenues.filter(v => v !== targetVenue);
+        await updateDoc(doc(db,'users', docId),{
+          venues: updatedVenues,
+          venue: updatedVenues.length > 0 ? updatedVenues[0] : '',
+        });
+      }},
+    ]);
+  };
 
   const getInitials = (n:string) =>
     n?.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2)||'?';
 
+  const myVenueNames = venues.map(v => v.name);
+
   const shown = members
-    .filter(m=>m.role===activeTab)
+    .filter(m => m.role === activeTab)
+    .filter(m =>
+      myVenueNames.includes(m.venue) ||
+      (m.venues && m.venues.some(v => myVenueNames.includes(v)))
+    )
     .filter(m=>
       search.trim()==='' ||
       m.name?.toLowerCase().includes(search.toLowerCase()) ||
       m.email?.toLowerCase().includes(search.toLowerCase()) ||
       m.venue?.toLowerCase().includes(search.toLowerCase())
     );
+
+  const memberCountInScope = members.filter(m=>
+    m.role!=='owner' &&
+    (myVenueNames.includes(m.venue) || (m.venues && m.venues.some(v=>myVenueNames.includes(v))))
+  ).length;
 
   if (loading) return (
     <SafeAreaView style={s.container}>
@@ -197,7 +164,7 @@ const onRefresh = async () => {
         </TouchableOpacity>
         <View style={s.headerText}>
           <Text style={s.heading}>Team</Text>
-          <Text style={s.sub}>{members.filter(m=>m.role!=='owner').length} members</Text>
+          <Text style={s.sub}>{memberCountInScope} members</Text>
         </View>
         <TouchableOpacity style={s.inviteBtn} onPress={openInvite}>
           <Ionicons name="add" color="#000" size={18}/>
@@ -231,7 +198,7 @@ const onRefresh = async () => {
             <Text style={[s.tabText,activeTab===t.key&&s.tabTextActive]}>{t.label}</Text>
             <View style={[s.tabCount,activeTab===t.key&&{backgroundColor:'#00c896'}]}>
               <Text style={[s.tabCountText,activeTab===t.key&&{color:'#000'}]}>
-                {members.filter(m=>m.role===t.key).length}
+                {members.filter(m=>m.role===t.key&&(myVenueNames.includes(m.venue)||(m.venues&&m.venues.some(v=>myVenueNames.includes(v))))).length}
               </Text>
             </View>
           </TouchableOpacity>
@@ -240,17 +207,17 @@ const onRefresh = async () => {
 
       {/* Member list */}
       <FlatList
-  data={shown}
-  keyExtractor={item=>item.id}
-  contentContainerStyle={s.list}
-  refreshControl={
-    <RefreshControl
-      refreshing={refreshing}
-      onRefresh={onRefresh}
-      tintColor="#00c896"
-      colors={['#00c896']}
-    />
-  }
+        data={shown}
+        keyExtractor={item=>item.id}
+        contentContainerStyle={s.list}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor="#00c896"
+            colors={['#00c896']}
+          />
+        }
         ListEmptyComponent={
           <View style={s.emptyWrap}>
             <Ionicons name="people-outline" color="#3a4252" size={48}/>
@@ -275,11 +242,27 @@ const onRefresh = async () => {
                 <Text style={s.memberName}>{m.name}</Text>
                 <Text style={s.memberEmail}>{m.email}</Text>
                 <Text style={s.memberVenue}>
-  📍 {m.venues && m.venues.length > 1 ? m.venues.join(' · ') : m.venue}
-</Text>
+                  📍 {m.venues && m.venues.length > 1 ? m.venues.join(' · ') : m.venue}
+                </Text>
               </View>
               {m.role!=='owner'&&(
-                <TouchableOpacity style={s.removeBtn} onPress={()=>removeMember(m)}>
+                <TouchableOpacity style={s.removeBtn} onPress={()=>{
+                  if (m.venues && m.venues.length > 1) {
+                    Alert.alert(
+                      'Remove from which venue?',
+                      `${m.name} is assigned to multiple venues.`,
+                      [
+                        ...m.venues.filter(v => myVenueNames.includes(v)).map(vName => ({
+                          text: vName,
+                          onPress: () => removeMember(m, vName),
+                        })),
+                        {text:'Cancel', style:'cancel' as const},
+                      ]
+                    );
+                  } else {
+                    removeMember(m, m.venue);
+                  }
+                }}>
                   <Text style={s.removeBtnText}>Remove</Text>
                 </TouchableOpacity>
               )}
@@ -313,8 +296,25 @@ const onRefresh = async () => {
                 </View>
 
                 <Text style={s.fieldLabel}>ASSIGN TO VENUE</Text>
+                <View style={s.venueSearchBar}>
+                  <Ionicons name="search-outline" color="#6e7a8a" size={16}/>
+                  <TextInput
+                    style={s.venueSearchInput}
+                    placeholder="Search venues..."
+                    placeholderTextColor="#6e7a8a"
+                    value={venueSearch}
+                    onChangeText={setVenueSearch}
+                  />
+                  {venueSearch.length>0&&(
+                    <TouchableOpacity onPress={()=>setVenueSearch('')}>
+                      <Ionicons name="close-circle" color="#6e7a8a" size={16}/>
+                    </TouchableOpacity>
+                  )}
+                </View>
                 <View style={s.venueList}>
-                  {venues.map(v=>(
+                  {venues
+                    .filter(v=>v.name.toLowerCase().includes(venueSearch.toLowerCase()))
+                    .map(v=>(
                     <TouchableOpacity key={v.id}
                       style={[s.venueOpt,venueId===v.id&&s.venueOptActive]}
                       onPress={()=>setVenueId(v.id)}>
@@ -322,6 +322,9 @@ const onRefresh = async () => {
                       {venueId===v.id&&<Ionicons name="checkmark" color="#00c896" size={16}/>}
                     </TouchableOpacity>
                   ))}
+                  {venues.filter(v=>v.name.toLowerCase().includes(venueSearch.toLowerCase())).length===0&&(
+                    <Text style={{fontSize:12,color:'#6e7a8a',textAlign:'center',padding:12}}>No venues match "{venueSearch}"</Text>
+                  )}
                 </View>
 
                 <Text style={s.fieldLabel}>FULL NAME</Text>
@@ -392,6 +395,8 @@ const s = StyleSheet.create({
   roleOptText:      {fontSize:11,color:'#6e7a8a',fontWeight:'600',textAlign:'center'},
   roleOptTextActive:{color:'#00c896'},
   venueList:        {gap:8,marginBottom:16},
+  venueSearchBar:   {flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'#161b24',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderRadius:10,padding:10,marginBottom:10},
+  venueSearchInput: {flex:1,color:'#eef0f4',fontSize:13,padding:0},
   venueOpt:         {backgroundColor:'#161b24',borderWidth:1.5,borderColor:'rgba(255,255,255,.07)',borderRadius:10,padding:12,flexDirection:'row',justifyContent:'space-between',alignItems:'center'},
   venueOptActive:   {borderColor:'#00c896',backgroundColor:'rgba(0,200,150,.08)'},
   venueOptText:     {fontSize:13,color:'#6e7a8a',fontWeight:'500'},

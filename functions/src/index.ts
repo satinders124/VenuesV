@@ -391,3 +391,150 @@ export const createAuthUser = onRequest(
     }
   }
 );
+
+// ── INVITE TEAM MEMBER (called from app — Team/Overview screens) ──
+// Replaces client-side createUserWithEmailAndPassword, which was
+// silently signing the OWNER out and into the new staff account.
+// Admin SDK creates the Auth user server-side without touching any
+// client session, and always writes the Firestore doc at users/{uid}.
+export const inviteTeamMember = onRequest(
+  {
+    cors: true,
+    secrets: [SENDGRID_KEY],
+  },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
+
+    const { email, name, role, venue, callerUid } = req.body;
+
+    if (!email || !name || !role) {
+      res.status(400).json({ error: 'Email, name and role required' }); return;
+    }
+
+    // Basic caller validation — confirm the inviting user exists and is
+    // an owner or manager. (Optional: tighten further if needed.)
+    if (callerUid) {
+      const callerSnap = await admin.firestore().collection('users').doc(callerUid).get();
+      const callerRole = callerSnap.exists ? callerSnap.data()?.role : null;
+      if (callerRole !== 'owner' && callerRole !== 'manager') {
+        res.status(403).json({ error: 'Not authorised to invite team members' }); return;
+      }
+    }
+
+    try {
+      // Check if a Firestore user doc already exists for this email
+      const existingSnap = await admin.firestore()
+        .collection('users')
+        .where('email', '==', email)
+        .limit(1)
+        .get();
+
+      if (!existingSnap.empty) {
+        // Existing user — just update their role/venue assignment
+        const existingDoc = existingSnap.docs[0];
+        const existingData = existingDoc.data();
+        const existingUid = existingData.uid || existingDoc.id;
+        const currentVenues: string[] = existingData.venues
+          || (existingData.venue ? [existingData.venue] : []);
+        if (venue && !currentVenues.includes(venue)) currentVenues.push(venue);
+
+        await admin.firestore().collection('users').doc(existingUid).set({
+          ...existingData,
+          uid: existingUid,
+          role,
+          venues: currentVenues,
+          venue: existingData.venue || venue || '',
+        }, { merge: true });
+
+        res.status(200).json({ success: true, uid: existingUid, existed: true });
+        return;
+      }
+
+      // New user — create Auth account server-side (does NOT affect caller's session)
+      const tmp = 'Tmp' + Math.random().toString(36).slice(2, 8) + '!';
+      let uid: string;
+      try {
+        const userRecord = await admin.auth().createUser({
+          email,
+          password: tmp,
+          displayName: name,
+        });
+        uid = userRecord.uid;
+      } catch (authErr: any) {
+        if (authErr.code === 'auth/email-already-exists') {
+          const existing = await admin.auth().getUserByEmail(email);
+          uid = existing.uid;
+        } else {
+          throw authErr;
+        }
+      }
+
+      await admin.firestore().collection('users').doc(uid).set({
+        uid, name, email, role,
+        venue: venue || '',
+        venues: venue ? [venue] : [],
+        tempPassword: tmp,
+      }, { merge: true });
+
+      res.status(200).json({ success: true, uid, existed: false });
+
+    } catch (err: any) {
+      console.error('inviteTeamMember error:', err);
+      res.status(500).json({ error: err.message || 'Failed to invite team member' });
+    }
+  }
+);
+
+// ── PASSWORD RESET TEMPLATE ───────────────────────────────
+const passwordResetTemplate = (name: string, resetLink: string) =>
+  baseTemplate(`
+    <h2 class="title">Reset your password 🔑</h2>
+    <p class="text">Hi <strong>${name}</strong>, we received a request to reset your Venues V password.</p>
+    <p class="text">Click the button below to choose a new password:</p>
+    <a href="${resetLink}" class="btn">Reset Password →</a>
+    <div class="divider"></div>
+    <p class="text" style="font-size:13px;color:#999">
+      This link will expire shortly for security reasons. If you didn't request this, you can safely ignore this email — your password will not be changed.<br/>
+      Questions? Email <a href="mailto:hello@venuesv.com" style="color:#00c896">hello@venuesv.com</a>
+    </p>
+  `);
+
+// ── SEND PASSWORD RESET (called from app — LoginScreen) ───
+// Replaces client-side sendPasswordResetEmail (which sends from Firebase's
+// own domain/templates). Admin SDK generates the reset link, SendGrid sends
+// it with full Venues V branding, matching OTP/invite emails.
+export const sendPasswordReset = onRequest(
+  {
+    cors: true,
+    secrets: [SENDGRID_KEY],
+  },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
+    const { email } = req.body;
+    if (!email) { res.status(400).json({ error: 'Email required' }); return; }
+
+    // Always respond success regardless of whether the account exists,
+    // to avoid leaking which emails are registered.
+    try {
+      const userRecord = await admin.auth().getUserByEmail(email);
+      const resetLink = await admin.auth().generatePasswordResetLink(email, {
+        url: 'https://venuesv.com',
+      });
+
+      const sgMail = require('@sendgrid/mail');
+      sgMail.setApiKey(SENDGRID_KEY.value());
+      await sgMail.send({
+        to: email,
+        from: { email: FROM_EMAIL, name: FROM_NAME },
+        subject: `Reset your Venues V password 🔑`,
+        html: passwordResetTemplate(userRecord.displayName || 'there', resetLink),
+      });
+      console.log(`Password reset email sent to: ${email}`);
+    } catch (err: any) {
+      // Don't leak whether the account exists — log internally, still return success
+      console.log('sendPasswordReset (user may not exist):', err.code || err.message);
+    }
+
+    res.status(200).json({ success: true });
+  }
+);

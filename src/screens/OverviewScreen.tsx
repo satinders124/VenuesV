@@ -8,20 +8,19 @@ import {
   collection, onSnapshot, updateDoc, deleteDoc,
   doc, addDoc, setDoc, serverTimestamp, getDocs, query, where
 } from 'firebase/firestore';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
-import { auth, db } from '../config/firebase';
+import { db } from '../config/firebase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { RefreshControl } from 'react-native';
 
+const INVITE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/inviteTeamMember';
 
-
-type Venue  = { id:string; name:string; suburb:string; score:number; };
+type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; };
 type Task   = { id:string; done:boolean; venueId:string; };
 type Issue  = { id:string; status:string; priority:string; venueId:string; };
 type Zone   = { id:string; name:string; icon:string; status:string; venueId:string; };
-type Member = { id:string; name:string; role:string; email:string; venue:string; venues?:string[]; };
+type Member = { id:string; uid?:string; name:string; role:string; email:string; venue:string; venues?:string[]; };
 
 
 const VENUE_HEALTH = (score:number, issues:number) => {
@@ -63,10 +62,10 @@ export default function OverviewScreen() {
   const [search,  setSearch]  = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-const onRefresh = async () => {
-  setRefreshing(true);
-  setTimeout(() => setRefreshing(false), 1000);
-};
+  const onRefresh = async () => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 1000);
+  };
 
   const [selVenue,  setSelVenue]  = useState<Venue|null>(null);
   const [activeTab, setActiveTab] = useState<'details'|'zones'|'team'>('details');
@@ -89,24 +88,24 @@ const onRefresh = async () => {
   const [inviting,    setInviting]    = useState(false);
 
   const [memberSearch,    setMemberSearch]    = useState('');
-const [selectedMember,  setSelectedMember]  = useState<Member|null>(null);
+  const [selectedMember,  setSelectedMember]  = useState<Member|null>(null);
 
   useEffect(() => {
     const u1 = onSnapshot(collection(db,'venues'), s=>{
-  const all = s.docs.map(d=>({id:d.id,...d.data()})) as Venue[];
-  const userVenues = user?.venues || (user?.venue ? [user.venue] : []);
-  const filtered = user?.role==='owner'
-    ? all.filter((v:any)=>v.ownerId===user.uid)
-    : all.filter(v=>userVenues.includes(v.name));
-  setVenues(filtered);
-  setLoading(false);
-  // Update selVenue if it's open — keeps team tab in sync
-  setSelVenue(prev => {
-    if (!prev) return prev;
-    const updated = all.find(v=>v.id===prev.id);
-    return updated || prev;
-  });
-});
+      const all = s.docs.map(d=>({id:d.id,...d.data()})) as Venue[];
+      const userVenues = (user as any)?.venues || (user?.venue ? [user.venue] : []);
+      const filtered = user?.role==='owner'
+        ? all.filter((v:any)=>v.ownerId===user.uid)
+        : all.filter(v=>userVenues.includes(v.name));
+      setVenues(filtered);
+      setLoading(false);
+      // Update selVenue if it's open — keeps team tab in sync
+      setSelVenue(prev => {
+        if (!prev) return prev;
+        const updated = all.find(v=>v.id===prev.id);
+        return updated || prev;
+      });
+    });
     const u2 = onSnapshot(collection(db,'tasks'),   s=>setTasks(s.docs.map(d=>({id:d.id,...d.data()})) as Task[]));
     const u3 = onSnapshot(collection(db,'issues'),  s=>setIssues(s.docs.map(d=>({id:d.id,...d.data()})) as Issue[]));
     const u4 = onSnapshot(collection(db,'zones'),   s=>setZones(s.docs.map(d=>({id:d.id,...d.data()})) as Zone[]));
@@ -163,92 +162,53 @@ const [selectedMember,  setSelectedMember]  = useState<Member|null>(null);
   };
 
   const removeMember = (m:Member) => {
-  Alert.alert('Remove Member',`Remove ${m.name} from ${selVenue?.name}?`,[
-    {text:'Cancel',style:'cancel'},
-    {text:'Remove',style:'destructive',onPress:async()=>{
-      const currentVenues: string[] = m.venues || (m.venue ? [m.venue] : []);
-      const updatedVenues = currentVenues.filter(v=>v!==selVenue?.name);
-      await updateDoc(doc(db,'users',m.id),{
-        venues: updatedVenues,
-        venue: updatedVenues.length>0 ? updatedVenues[0] : '',
-      });
-    }},
-  ]);
-};
+    Alert.alert('Remove Member',`Remove ${m.name} from ${selVenue?.name}?`,[
+      {text:'Cancel',style:'cancel'},
+      {text:'Remove',style:'destructive',onPress:async()=>{
+        const docId = m.uid || m.id;
+        const currentVenues: string[] = m.venues || (m.venue ? [m.venue] : []);
+        const updatedVenues = currentVenues.filter(v=>v!==selVenue?.name);
+        await updateDoc(doc(db,'users',docId),{
+          venues: updatedVenues,
+          venue: updatedVenues.length>0 ? updatedVenues[0] : '',
+        });
+      }},
+    ]);
+  };
 
+  // ── INVITE — now calls the inviteTeamMember Cloud Function (Admin SDK).
+  // Same fix as TeamScreen: never touches the caller's auth session.
   const inviteMember = async () => {
-  if (!inviteName||!inviteEmail) {Alert.alert('Missing','Enter name and email.');return;}
-  setInviting(true);
-  try {
-    // Check if already in Firestore
-    const existing = await getDocs(
-      query(collection(db,'users'), where('email','==',inviteEmail))
-    );
-
-    if (!existing.empty) {
-  const existingData = existing.docs[0].data();
-  const currentVenue = existingData.venue;
-  if (currentVenue && currentVenue !== selVenue!.name) {
-  Alert.alert(
-    'Already Assigned',
-    `${existingData.name} is currently at ${currentVenue}. What would you like to do?`,
-    [
-      {text:'Cancel', style:'cancel'},
-      {text:'Add to Both', onPress: async()=>{
-        const currentVenues: string[] = existingData.venues || [currentVenue];
-        if (!currentVenues.includes(selVenue!.name)) {
-          currentVenues.push(selVenue!.name);
-        }
-        await updateDoc(doc(db,'users',existing.docs[0].id), {
-          venues: currentVenues,
-          venue: currentVenue, // keep primary venue
+    if (!inviteName||!inviteEmail) {Alert.alert('Missing','Enter name and email.');return;}
+    if (!selVenue) {Alert.alert('Missing','No venue selected.');return;}
+    setInviting(true);
+    try {
+      const resp = await fetch(INVITE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: inviteEmail,
+          name: inviteName,
           role: inviteRole,
-        });
-        Alert.alert('Done',`${existingData.name} added to both venues.`);
-        setInviteName('');setInviteEmail('');setInviteRole('cleaner');
-        setInviting(false);
-      }},
-      {text:'Move', onPress: async()=>{
-        await updateDoc(doc(db,'users',existing.docs[0].id), {
-          venue: selVenue!.name,
-          venues: [selVenue!.name],
-          role: inviteRole,
-        });
-        Alert.alert('Done',`${existingData.name} moved to ${selVenue!.name}.`);
-        setInviteName('');setInviteEmail('');setInviteRole('cleaner');
-        setInviting(false);
-      }},
-    ]
-  );
-  setInviting(false);
-  return;
-}
-  await updateDoc(doc(db,'users',existing.docs[0].id), {
-    venue: selVenue!.name,
-    role: inviteRole,
-  });
-  Alert.alert('Done',`${inviteName} has been assigned to ${selVenue!.name}.`);
-    } else {
-      // New user — create Firebase Auth account
-      const tmp = 'Tmp'+Math.random().toString(36).slice(2,8)+'!';
-      const cred = await createUserWithEmailAndPassword(auth,inviteEmail,tmp);
-      await setDoc(doc(db,'users',cred.user.uid),{
-        uid:cred.user.uid, name:inviteName, email:inviteEmail,
-        role:inviteRole, venue:selVenue!.name,
-        tempPassword:tmp,
+          venue: selVenue.name,
+          callerUid: user?.uid,
+        }),
       });
-      Alert.alert('Invite Sent',`${inviteName} will receive an email with login details.`);
+      const result = await resp.json();
+      if (!resp.ok) throw new Error(result.error || 'Failed to invite');
+
+      setInviteName(''); setInviteEmail(''); setInviteRole('cleaner');
+      Alert.alert(
+        'Done',
+        result.existed
+          ? `${inviteName} has been assigned to ${selVenue.name}.`
+          : `${inviteName} will receive an email with login details.`
+      );
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to invite team member.');
     }
-    setInviteName('');setInviteEmail('');setInviteRole('cleaner');
-  } catch(err:any){
-    if (err.code==='auth/email-already-in-use') {
-      Alert.alert('Error','This email is already registered. Contact support.');
-    } else {
-      Alert.alert('Error',err.message);
-    }
-  }
-  setInviting(false);
-};
+    setInviting(false);
+  };
 
   const myVenueIds  = venues.map(v=>v.id);
   const allIssues   = issues.filter(i=>i.status!=='resolved'&&myVenueIds.includes(i.venueId)).length;
@@ -271,16 +231,16 @@ const [selectedMember,  setSelectedMember]  = useState<Member|null>(null);
   return (
     <SafeAreaView style={s.container}>
       <ScrollView
-  contentContainerStyle={s.scroll}
-  refreshControl={
-    <RefreshControl
-      refreshing={refreshing}
-      onRefresh={onRefresh}
-      tintColor="#00c896"
-      colors={['#00c896']}
-    />
-  }
->
+        contentContainerStyle={s.scroll}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor="#00c896"
+            colors={['#00c896']}
+          />
+        }
+      >
 
         {/* Header with sites badge top right */}
         <View style={s.header}>
@@ -353,7 +313,7 @@ const [selectedMember,  setSelectedMember]  = useState<Member|null>(null);
                 {[
                   [`${v.score||0}%`, 'Inspection', scoreColor],
                   [`${st.issues}`,   'Open Issues', st.issues===0?'#00c896':st.highIssues>0?'#f24e6e':'#f5a623'],
-                  [`${members.filter(m=>m.venue===v.name).length}`, 'Staff', '#2c7ef7'],
+                  [`${members.filter(m=>m.venue===v.name||(m.venues&&m.venues.includes(v.name))).length}`, 'Staff', '#2c7ef7'],
                 ].map(([val,label,color])=>(
                   <View key={label} style={s.metric}>
                     <Text style={[s.metricVal,{color}]}>{val}</Text>
@@ -435,37 +395,32 @@ const [selectedMember,  setSelectedMember]  = useState<Member|null>(null);
                     </TouchableOpacity>
 
                     <TouchableOpacity
-  style={{backgroundColor:'rgba(242,78,110,.1)',borderWidth:1,borderColor:'rgba(242,78,110,.3)',borderRadius:10,padding:13,alignItems:'center',marginTop:8}}
-  onPress={()=>Alert.alert('Delete Venue',`Are you sure you want to delete ${selVenue?.name}? This cannot be undone.`,[
-    {text:'Cancel',style:'cancel'},
-    {text:'Delete',style:'destructive',onPress:async()=>{
-  const venueId = selVenue!.id;
-  const venueName = selVenue!.name;
+                      style={{backgroundColor:'rgba(242,78,110,.1)',borderWidth:1,borderColor:'rgba(242,78,110,.3)',borderRadius:10,padding:13,alignItems:'center',marginTop:8}}
+                      onPress={()=>Alert.alert('Delete Venue',`Are you sure you want to delete ${selVenue?.name}? This cannot be undone.`,[
+                        {text:'Cancel',style:'cancel'},
+                        {text:'Delete',style:'destructive',onPress:async()=>{
+                          const venueId = selVenue!.id;
+                          const venueName = selVenue!.name;
 
-  // Delete all issues for this venue
-  const issuesSnap = await getDocs(query(collection(db,'issues'),where('venueId','==',venueId)));
-  await Promise.all(issuesSnap.docs.map(d=>deleteDoc(doc(db,'issues',d.id))));
+                          const issuesSnap = await getDocs(query(collection(db,'issues'),where('venueId','==',venueId)));
+                          await Promise.all(issuesSnap.docs.map(d=>deleteDoc(doc(db,'issues',d.id))));
 
-  // Delete all tasks for this venue
-  const tasksSnap = await getDocs(query(collection(db,'tasks'),where('venueId','==',venueId)));
-  await Promise.all(tasksSnap.docs.map(d=>deleteDoc(doc(db,'tasks',d.id))));
+                          const tasksSnap = await getDocs(query(collection(db,'tasks'),where('venueId','==',venueId)));
+                          await Promise.all(tasksSnap.docs.map(d=>deleteDoc(doc(db,'tasks',d.id))));
 
-  // Delete all zones for this venue
-  const zonesSnap = await getDocs(query(collection(db,'zones'),where('venueId','==',venueId)));
-  await Promise.all(zonesSnap.docs.map(d=>deleteDoc(doc(db,'zones',d.id))));
+                          const zonesSnap = await getDocs(query(collection(db,'zones'),where('venueId','==',venueId)));
+                          await Promise.all(zonesSnap.docs.map(d=>deleteDoc(doc(db,'zones',d.id))));
 
-  // Remove venue from all staff
-  const usersSnap = await getDocs(query(collection(db,'users'),where('venue','==',venueName)));
-  await Promise.all(usersSnap.docs.map(d=>updateDoc(doc(db,'users',d.id),{venue:''})));
+                          const usersSnap = await getDocs(query(collection(db,'users'),where('venue','==',venueName)));
+                          await Promise.all(usersSnap.docs.map(d=>updateDoc(doc(db,'users',d.id),{venue:''})));
 
-  // Delete venue
-  await deleteDoc(doc(db,'venues',venueId));
-  setSelVenue(null);
-}},
-  ])}
->
-  <Text style={{color:'#f24e6e',fontWeight:'700',fontSize:14}}>Delete Venue</Text>
-</TouchableOpacity>
+                          await deleteDoc(doc(db,'venues',venueId));
+                          setSelVenue(null);
+                        }},
+                      ])}
+                    >
+                      <Text style={{color:'#f24e6e',fontWeight:'700',fontSize:14}}>Delete Venue</Text>
+                    </TouchableOpacity>
                   </View>
                 )}
 
@@ -549,154 +504,162 @@ const [selectedMember,  setSelectedMember]  = useState<Member|null>(null);
                 {/* TEAM */}
                 {activeTab==='team'&&(
 
-<View style={s.tabContent}>
-  {/* Existing team members */}
-  {members.filter(m=>
-  m.venue===selVenue?.name ||
-  (m.venues && m.venues.includes(selVenue?.name||''))
-).map((m,i,arr)=>{
-    const cfg = ROLE_CONFIG[m.role]||ROLE_CONFIG.staff;
-    return (
-      <View key={m.id} style={[s.memberRow,i<arr.length-1&&s.memberBorder]}>
-        <View style={[s.memberAv,{backgroundColor:cfg.color+'33'}]}>
-          <Text style={[s.memberIni,{color:cfg.color}]}>
-            {m.name?.split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
-          </Text>
-        </View>
-        <View style={s.memberInfo}>
-          <Text style={s.memberName}>{m.name}</Text>
-          <Text style={s.memberEmail}>{m.email}</Text>
-          <View style={[s.roleBadge,{backgroundColor:cfg.color+'22',alignSelf:'flex-start',marginTop:3}]}>
-            <Text style={[s.roleText,{color:cfg.color}]}>{cfg.label}</Text>
-          </View>
-        </View>
-        {m.role!=='owner'&&(
-          <TouchableOpacity style={s.removeBtn} onPress={()=>removeMember(m)}>
-            <Text style={s.removeBtnText}>Remove</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-    );
-  })}
+                  <View style={s.tabContent}>
+                    {/* Existing team members */}
+                    {members.filter(m=>
+                      m.venue===selVenue?.name ||
+                      (m.venues && m.venues.includes(selVenue?.name||''))
+                    ).map((m,i,arr)=>{
+                      const cfg = ROLE_CONFIG[m.role]||ROLE_CONFIG.staff;
+                      return (
+                        <View key={m.id} style={[s.memberRow,i<arr.length-1&&s.memberBorder]}>
+                          <View style={[s.memberAv,{backgroundColor:cfg.color+'33'}]}>
+                            <Text style={[s.memberIni,{color:cfg.color}]}>
+                              {m.name?.split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
+                            </Text>
+                          </View>
+                          <View style={s.memberInfo}>
+                            <Text style={s.memberName}>{m.name}</Text>
+                            <Text style={s.memberEmail}>{m.email}</Text>
+                            <View style={[s.roleBadge,{backgroundColor:cfg.color+'22',alignSelf:'flex-start',marginTop:3}]}>
+                              <Text style={[s.roleText,{color:cfg.color}]}>{cfg.label}</Text>
+                            </View>
+                          </View>
+                          {m.role!=='owner'&&(
+                            <TouchableOpacity style={s.removeBtn} onPress={()=>removeMember(m)}>
+                              <Text style={s.removeBtnText}>Remove</Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      );
+                    })}
 
-  {members.filter(m=>
-  m.venue===selVenue?.name ||
-  (m.venues && m.venues.includes(selVenue?.name||''))
-).length===0&&(
-    <Text style={s.emptyText2}>No staff assigned yet</Text>
-  )}
+                    {members.filter(m=>
+                      m.venue===selVenue?.name ||
+                      (m.venues && m.venues.includes(selVenue?.name||''))
+                    ).length===0&&(
+                      <Text style={s.emptyText2}>No staff assigned yet</Text>
+                    )}
 
-  <View style={s.inviteDivider}>
-    <Text style={s.inviteTitle}>Add Team Member</Text>
-  </View>
+                    <View style={s.inviteDivider}>
+                      <Text style={s.inviteTitle}>Add Team Member</Text>
+                    </View>
 
-  {/* Role selector */}
-  <Text style={s.fieldLabel}>ROLE</Text>
-  <View style={s.roleRow}>
-    {INVITE_ROLES.map(r=>(
-      <TouchableOpacity key={r.id} style={[s.roleOpt,inviteRole===r.id&&s.roleOptActive]} onPress={()=>setInviteRole(r.id)}>
-        <Text style={[s.roleOptText,inviteRole===r.id&&s.roleOptTextActive]}>{r.label}</Text>
-      </TouchableOpacity>
-    ))}
-  </View>
+                    {/* Role selector */}
+                    <Text style={s.fieldLabel}>ROLE</Text>
+                    <View style={s.roleRow}>
+                      {INVITE_ROLES.map(r=>(
+                        <TouchableOpacity key={r.id} style={[s.roleOpt,inviteRole===r.id&&s.roleOptActive]} onPress={()=>setInviteRole(r.id)}>
+                          <Text style={[s.roleOptText,inviteRole===r.id&&s.roleOptTextActive]}>{r.label}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
 
-  {/* Search existing users */}
-  <Text style={s.fieldLabel}>SEARCH EXISTING MEMBERS</Text>
-  <View style={s.searchBarInline}>
-    <Text style={{fontSize:14,color:'#6e7a8a'}}>⌕</Text>
-    <TextInput
-      style={s.searchInputInline}
-      placeholder="Search by name or email..."
-      placeholderTextColor="#6e7a8a"
-      value={memberSearch}
-      onChangeText={setMemberSearch}
-    />
-    {memberSearch.length>0&&(
-      <TouchableOpacity onPress={()=>{setMemberSearch('');setSelectedMember(null);}}>
-        <Text style={{color:'#6e7a8a',fontSize:16}}>✕</Text>
-      </TouchableOpacity>
-    )}
-  </View>
+                    {/* Search existing users */}
+                    <Text style={s.fieldLabel}>SEARCH EXISTING MEMBERS</Text>
+                    <View style={s.searchBarInline}>
+                      <Text style={{fontSize:14,color:'#6e7a8a'}}>⌕</Text>
+                      <TextInput
+                        style={s.searchInputInline}
+                        placeholder="Search by name or email..."
+                        placeholderTextColor="#6e7a8a"
+                        value={memberSearch}
+                        onChangeText={setMemberSearch}
+                      />
+                      {memberSearch.length>0&&(
+                        <TouchableOpacity onPress={()=>{setMemberSearch('');setSelectedMember(null);}}>
+                          <Text style={{color:'#6e7a8a',fontSize:16}}>✕</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
 
-  {/* Search results */}
-  {memberSearch.length>1&&(
-    <View style={s.searchResults}>
-      {members
-        .filter(m=>
-          m.venue!==selVenue?.name &&
-          m.role!=='owner' &&
-          (m.name?.toLowerCase().includes(memberSearch.toLowerCase()) ||
-           m.email?.toLowerCase().includes(memberSearch.toLowerCase()))
-        )
-        .slice(0,5)
-        .map(m=>{
-          const cfg = ROLE_CONFIG[m.role]||ROLE_CONFIG.staff;
-          const isSelected = selectedMember?.id===m.id;
-          return (
-            <TouchableOpacity key={m.id}
-              style={[s.searchResultItem, isSelected&&s.searchResultItemActive]}
-              onPress={()=>setSelectedMember(isSelected?null:m)}>
-              <View style={[s.memberAv,{backgroundColor:cfg.color+'33',width:32,height:32,borderRadius:16}]}>
-                <Text style={[s.memberIni,{color:cfg.color,fontSize:11}]}>
-                  {m.name?.split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
-                </Text>
-              </View>
-              <View style={{flex:1}}>
-                <Text style={{fontSize:13,fontWeight:'600',color:'#eef0f4'}}>{m.name}</Text>
-                <Text style={{fontSize:11,color:'#6e7a8a'}}>{m.email}</Text>
-                {m.venue&&<Text style={{fontSize:10,color:'#3a4252'}}>Currently at {m.venue}</Text>}
-              </View>
-              {isSelected&&<Text style={{color:'#00c896',fontSize:16}}>✓</Text>}
-            </TouchableOpacity>
-          );
-        })
-      }
-      {members.filter(m=>
-        m.venue!==selVenue?.name &&
-        m.role!=='owner' &&
-        (m.name?.toLowerCase().includes(memberSearch.toLowerCase()) ||
-         m.email?.toLowerCase().includes(memberSearch.toLowerCase()))
-      ).length===0&&(
-        <Text style={{fontSize:12,color:'#6e7a8a',padding:12,textAlign:'center'}}>
-          No existing members found — invite new below
-        </Text>
-      )}
-    </View>
-  )}
+                    {/* Search results */}
+                    {memberSearch.length>1&&(
+                      <View style={s.searchResults}>
+                        {members
+                          .filter(m=>
+                            m.venue!==selVenue?.name &&
+                            m.role!=='owner' &&
+                            (m.name?.toLowerCase().includes(memberSearch.toLowerCase()) ||
+                             m.email?.toLowerCase().includes(memberSearch.toLowerCase()))
+                          )
+                          .slice(0,5)
+                          .map(m=>{
+                            const cfg = ROLE_CONFIG[m.role]||ROLE_CONFIG.staff;
+                            const isSelected = selectedMember?.id===m.id;
+                            return (
+                              <TouchableOpacity key={m.id}
+                                style={[s.searchResultItem, isSelected&&s.searchResultItemActive]}
+                                onPress={()=>setSelectedMember(isSelected?null:m)}>
+                                <View style={[s.memberAv,{backgroundColor:cfg.color+'33',width:32,height:32,borderRadius:16}]}>
+                                  <Text style={[s.memberIni,{color:cfg.color,fontSize:11}]}>
+                                    {m.name?.split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
+                                  </Text>
+                                </View>
+                                <View style={{flex:1}}>
+                                  <Text style={{fontSize:13,fontWeight:'600',color:'#eef0f4'}}>{m.name}</Text>
+                                  <Text style={{fontSize:11,color:'#6e7a8a'}}>{m.email}</Text>
+                                  {m.venue&&<Text style={{fontSize:10,color:'#3a4252'}}>Currently at {m.venue}</Text>}
+                                </View>
+                                {isSelected&&<Text style={{color:'#00c896',fontSize:16}}>✓</Text>}
+                              </TouchableOpacity>
+                            );
+                          })
+                        }
+                        {members.filter(m=>
+                          m.venue!==selVenue?.name &&
+                          m.role!=='owner' &&
+                          (m.name?.toLowerCase().includes(memberSearch.toLowerCase()) ||
+                           m.email?.toLowerCase().includes(memberSearch.toLowerCase()))
+                        ).length===0&&(
+                          <Text style={{fontSize:12,color:'#6e7a8a',padding:12,textAlign:'center'}}>
+                            No existing members found — invite new below
+                          </Text>
+                        )}
+                      </View>
+                    )}
 
-  {/* Add selected member button */}
-  {selectedMember&&(
-    <TouchableOpacity style={s.saveBtn} onPress={async()=>{
-      setSavingDetails(true);
-      await updateDoc(doc(db,'users',selectedMember.id),{
-        venue:selVenue!.name, role:inviteRole
-      });
-      setSelectedMember(null);
-      setMemberSearch('');
-      setSavingDetails(false);
-      Alert.alert('Done',`${selectedMember.name} added to ${selVenue!.name}`);
-    }} disabled={savingDetails}>
-      {savingDetails
-        ?<ActivityIndicator color="#000"/>
-        :<Text style={s.saveBtnText}>Add {selectedMember.name} to {selVenue?.name}</Text>
-      }
-    </TouchableOpacity>
-  )}
+                    {/* Add selected member button — appends to venues array, never overwrites */}
+                    {selectedMember&&(
+                      <TouchableOpacity style={s.saveBtn} onPress={async()=>{
+                        setSavingDetails(true);
+                        const docId = selectedMember.uid || selectedMember.id;
+                        const currentVenues: string[] = selectedMember.venues
+                          || (selectedMember.venue ? [selectedMember.venue] : []);
+                        const updatedVenues = currentVenues.includes(selVenue!.name)
+                          ? currentVenues
+                          : [...currentVenues, selVenue!.name];
+                        await updateDoc(doc(db,'users',docId),{
+                          venues: updatedVenues,
+                          venue: selectedMember.venue || selVenue!.name,
+                          role: inviteRole,
+                        });
+                        setSelectedMember(null);
+                        setMemberSearch('');
+                        setSavingDetails(false);
+                        Alert.alert('Done',`${selectedMember.name} added to ${selVenue!.name}`);
+                      }} disabled={savingDetails}>
+                        {savingDetails
+                          ?<ActivityIndicator color="#000"/>
+                          :<Text style={s.saveBtnText}>Add {selectedMember.name} to {selVenue?.name}</Text>
+                        }
+                      </TouchableOpacity>
+                    )}
 
-  {/* Divider for new invite */}
-  <View style={{borderTopWidth:1,borderTopColor:'rgba(255,255,255,.07)',paddingTop:14,marginTop:8}}>
-    <Text style={[s.fieldLabel,{marginBottom:12}]}>OR INVITE NEW MEMBER</Text>
-  </View>
+                    {/* Divider for new invite */}
+                    <View style={{borderTopWidth:1,borderTopColor:'rgba(255,255,255,.07)',paddingTop:14,marginTop:8}}>
+                      <Text style={[s.fieldLabel,{marginBottom:12}]}>OR INVITE NEW MEMBER</Text>
+                    </View>
 
-  <Text style={s.fieldLabel}>FULL NAME</Text>
-  <TextInput style={s.input} value={inviteName} onChangeText={setInviteName} placeholder="e.g. Priya Sharma" placeholderTextColor="#6e7a8a"/>
-  <Text style={s.fieldLabel}>EMAIL</Text>
-  <TextInput style={s.input} value={inviteEmail} onChangeText={setInviteEmail} placeholder="priya@cleanpro.com.au" placeholderTextColor="#6e7a8a" keyboardType="email-address" autoCapitalize="none"/>
+                    <Text style={s.fieldLabel}>FULL NAME</Text>
+                    <TextInput style={s.input} value={inviteName} onChangeText={setInviteName} placeholder="e.g. Priya Sharma" placeholderTextColor="#6e7a8a"/>
+                    <Text style={s.fieldLabel}>EMAIL</Text>
+                    <TextInput style={s.input} value={inviteEmail} onChangeText={setInviteEmail} placeholder="priya@cleanpro.com.au" placeholderTextColor="#6e7a8a" keyboardType="email-address" autoCapitalize="none"/>
 
-  <TouchableOpacity style={s.inviteBtn} onPress={inviteMember} disabled={inviting}>
-    {inviting?<ActivityIndicator color="#000"/>:<Text style={s.inviteBtnText}>Send Invite</Text>}
-  </TouchableOpacity>
-</View>
+                    <TouchableOpacity style={s.inviteBtn} onPress={inviteMember} disabled={inviting}>
+                      {inviting?<ActivityIndicator color="#000"/>:<Text style={s.inviteBtnText}>Send Invite</Text>}
+                    </TouchableOpacity>
+                  </View>
                 )}
 
                 <View style={{height:30}}/>
@@ -802,8 +765,8 @@ const s = StyleSheet.create({
   inviteBtn:       {backgroundColor:'#00c896',borderRadius:10,padding:13,alignItems:'center',marginTop:8},
   inviteBtnText:   {color:'#000',fontWeight:'700',fontSize:14},
   searchBarInline:      {flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'#161b24',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderRadius:10,padding:10,marginBottom:8},
-searchInputInline:    {flex:1,color:'#eef0f4',fontSize:13,padding:0},
-searchResults:        {backgroundColor:'#161b24',borderRadius:10,borderWidth:1,borderColor:'rgba(255,255,255,.07)',marginBottom:12,overflow:'hidden'},
-searchResultItem:     {flexDirection:'row',alignItems:'center',gap:10,padding:12,borderBottomWidth:1,borderBottomColor:'rgba(255,255,255,.05)'},
-searchResultItemActive:{backgroundColor:'rgba(0,200,150,.08)'},
+  searchInputInline:    {flex:1,color:'#eef0f4',fontSize:13,padding:0},
+  searchResults:        {backgroundColor:'#161b24',borderRadius:10,borderWidth:1,borderColor:'rgba(255,255,255,.07)',marginBottom:12,overflow:'hidden'},
+  searchResultItem:     {flexDirection:'row',alignItems:'center',gap:10,padding:12,borderBottomWidth:1,borderBottomColor:'rgba(255,255,255,.05)'},
+  searchResultItemActive:{backgroundColor:'rgba(0,200,150,.08)'},
 });

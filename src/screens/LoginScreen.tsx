@@ -7,26 +7,66 @@ import {
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 
+const RESET_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/sendPasswordReset';
+
 export default function LoginScreen() {
   const { login } = useAuth();
   const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading]   = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   const handleLogin = async () => {
-  if (!email || !password) {
-    Alert.alert('Missing fields', 'Please enter email and password.');
-    return;
-  }
-  setLoading(true);
-  try {
-    await login(email, password);
-  } catch (err: any) {
-    Alert.alert('Login Failed', err.message);
-    setLoading(false);
-  }
-  // Don't setLoading(false) on success — AuthContext handles it
-};
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanPassword = password.trim();
+    if (!cleanEmail || !cleanPassword) {
+      Alert.alert('Missing fields', 'Please enter email and password.');
+      return;
+    }
+    setLoading(true);
+    try {
+      await login(cleanEmail, cleanPassword);
+    } catch (err: any) {
+      Alert.alert('Login Failed', err.message);
+      setLoading(false);
+    }
+    // Don't setLoading(false) on success — AuthContext handles it
+  };
+
+  const handleForgotPassword = () => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) {
+      Alert.alert('Email required', 'Enter your email address above first, then tap "Forgot password?" again.');
+      return;
+    }
+    Alert.alert(
+      'Reset Password',
+      `Send a password reset link to ${cleanEmail}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Send Link',
+          onPress: async () => {
+            setResetting(true);
+            try {
+              await fetch(RESET_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: cleanEmail }),
+              });
+            } catch {
+              // Network errors are swallowed too — same generic message either way
+            }
+            Alert.alert(
+              'Check your email',
+              `If an account exists for ${cleanEmail}, a password reset link has been sent.`
+            );
+            setResetting(false);
+          },
+        },
+      ]
+    );
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -40,18 +80,18 @@ export default function LoginScreen() {
           showsVerticalScrollIndicator={false}
         >
           {/* Logo */}
-<View style={styles.logoWrap}>
-  <Image
-    source={require('../../assets/icon.png')}
-    style={styles.logoImage}
-    resizeMode="contain"
-  />
-  <Text style={styles.logoText}>Venues V</Text>
-  <Text style={styles.logoSub}>Venue Operations Platform</Text>
-</View>
+          <View style={styles.logoWrap}>
+            <Image
+              source={require('../../assets/icon.png')}
+              style={styles.logoImage}
+              resizeMode="contain"
+            />
+            <Text style={styles.logoText}>Venues V</Text>
+            <Text style={styles.logoSub}>Venue Operations Platform</Text>
+          </View>
 
-<Text style={styles.welcomeText}>Welcome back</Text>
-<Text style={styles.welcomeSub}>Sign in to your account</Text>
+          <Text style={styles.welcomeText}>Welcome back</Text>
+          <Text style={styles.welcomeSub}>Sign in to your account</Text>
 
           <TextInput
             style={styles.input}
@@ -61,6 +101,7 @@ export default function LoginScreen() {
             onChangeText={setEmail}
             keyboardType="email-address"
             autoCapitalize="none"
+            autoCorrect={false}
             returnKeyType="next"
           />
           <TextInput
@@ -70,9 +111,19 @@ export default function LoginScreen() {
             value={password}
             onChangeText={setPassword}
             secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            textContentType="password"
             returnKeyType="done"
             onSubmitEditing={handleLogin}
           />
+
+          <TouchableOpacity onPress={handleForgotPassword} disabled={resetting} style={styles.forgotWrap}>
+            {resetting
+              ? <ActivityIndicator color="#00c896" size="small" />
+              : <Text style={styles.forgotText}>Forgot password?</Text>
+            }
+          </TouchableOpacity>
 
           <TouchableOpacity style={styles.loginBtn} onPress={handleLogin} disabled={loading}>
             {loading
@@ -104,6 +155,8 @@ const styles = StyleSheet.create({
   welcomeText:  { fontSize:22, fontWeight:'800', color:'#eef0f4', marginBottom:4 },
   welcomeSub:   { fontSize:14, color:'#6e7a8a', marginBottom:28 },
   input:        { backgroundColor:'#161b24', borderWidth:1, borderColor:'rgba(255,255,255,.07)', borderRadius:10, padding:14, color:'#eef0f4', fontSize:15, marginBottom:12 },
+  forgotWrap:   { alignSelf:'flex-end', marginBottom:20, marginTop:-4 },
+  forgotText:   { color:'#00c896', fontSize:13, fontWeight:'600' },
   loginBtn:     { backgroundColor:'#00c896', borderRadius:10, padding:15, alignItems:'center', marginTop:4 },
   loginBtnText: { color:'#000', fontSize:15, fontWeight:'800', letterSpacing:1.5 },
   hint:         { textAlign:'center', fontSize:12, color:'#3a4252', marginTop:20, lineHeight:18 },

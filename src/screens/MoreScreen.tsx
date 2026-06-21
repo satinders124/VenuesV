@@ -1,8 +1,14 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView,
-  TouchableOpacity, ScrollView, Alert
+  TouchableOpacity, ScrollView, Alert, Modal,
+  TextInput, ActivityIndicator, KeyboardAvoidingView, Platform
 } from 'react-native';
+import {
+  updatePassword, reauthenticateWithCredential,
+  EmailAuthProvider,
+} from 'firebase/auth';
+import { auth } from '../config/firebase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -28,6 +34,12 @@ export default function MoreScreen() {
   const { user, logout } = useAuth();
   const navigation = useNavigation<any>();
 
+  const [pwdModalOpen, setPwdModalOpen] = useState(false);
+  const [currentPwd, setCurrentPwd]     = useState('');
+  const [newPwd, setNewPwd]             = useState('');
+  const [confirmPwd, setConfirmPwd]     = useState('');
+  const [changing, setChanging]         = useState(false);
+
   const isOwner   = user?.role === 'owner';
   const isManager = user?.role === 'manager';
   const isWorker  = user?.role === 'cleaner' || user?.role === 'staff';
@@ -43,6 +55,51 @@ export default function MoreScreen() {
   };
 
   const roleColor = ROLE_COLOR[user?.role||'cleaner'] || '#00c896';
+
+  const openPasswordModal = () => {
+    setCurrentPwd(''); setNewPwd(''); setConfirmPwd('');
+    setPwdModalOpen(true);
+  };
+
+  const handleChangePassword = async () => {
+    if (!currentPwd || !newPwd || !confirmPwd) {
+      Alert.alert('Missing fields', 'Please fill in all fields.');
+      return;
+    }
+    if (newPwd.length < 6) {
+      Alert.alert('Password too short', 'New password must be at least 6 characters.');
+      return;
+    }
+    if (newPwd !== confirmPwd) {
+      Alert.alert('Passwords don\'t match', 'New password and confirmation must match.');
+      return;
+    }
+
+    setChanging(true);
+    try {
+      const fbUser = auth.currentUser;
+      if (!fbUser || !fbUser.email) throw new Error('Not signed in.');
+
+      // Firebase requires recent login to change password — reauthenticate first
+      const credential = EmailAuthProvider.credential(fbUser.email, currentPwd);
+      await reauthenticateWithCredential(fbUser, credential);
+      await updatePassword(fbUser, newPwd);
+
+      setPwdModalOpen(false);
+      Alert.alert('✅ Password Changed', 'Your password has been updated successfully.');
+    } catch (err: any) {
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        Alert.alert('Error', 'Current password is incorrect.');
+      } else if (err.code === 'auth/weak-password') {
+        Alert.alert('Error', 'New password is too weak.');
+      } else if (err.code === 'auth/too-many-requests') {
+        Alert.alert('Error', 'Too many attempts. Please try again later.');
+      } else {
+        Alert.alert('Error', err.message || 'Failed to change password.');
+      }
+    }
+    setChanging(false);
+  };
 
   return (
     <SafeAreaView style={s.container}>
@@ -93,6 +150,20 @@ export default function MoreScreen() {
           ))}
         </View>
 
+        {/* Account section */}
+        <View style={s.menuList}>
+          <TouchableOpacity style={[s.menuItem, s.menuItemLast]} onPress={openPasswordModal}>
+            <View style={[s.menuIcon, { backgroundColor: '#00c89618' }]}>
+              <Ionicons name="key-outline" color="#00c896" size={20} />
+            </View>
+            <View style={s.menuText}>
+              <Text style={s.menuLabel}>Change Password</Text>
+              <Text style={s.menuDesc}>Update your account password</Text>
+            </View>
+            <Ionicons name="chevron-forward" color="#3a4252" size={16} />
+          </TouchableOpacity>
+        </View>
+
         {/* Logout */}
         <TouchableOpacity
           style={s.logoutBtn}
@@ -108,6 +179,68 @@ export default function MoreScreen() {
         <Text style={s.version}>Venues V v1.0.0</Text>
 
       </ScrollView>
+
+      {/* Change Password Modal */}
+      <Modal visible={pwdModalOpen} transparent animationType="slide">
+        <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':'height'}>
+          <View style={s.modalOverlay}>
+            <View style={s.modalBox}>
+              <View style={s.modalHeader}>
+                <Text style={s.modalTitle}>Change Password</Text>
+                <TouchableOpacity onPress={()=>setPwdModalOpen(false)}>
+                  <Text style={s.modalClose}>✕</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={s.fieldLabel}>CURRENT PASSWORD</Text>
+              <TextInput
+                style={s.input}
+                placeholder="Enter current password"
+                placeholderTextColor="#6e7a8a"
+                value={currentPwd}
+                onChangeText={setCurrentPwd}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+
+              <Text style={s.fieldLabel}>NEW PASSWORD</Text>
+              <TextInput
+                style={s.input}
+                placeholder="At least 6 characters"
+                placeholderTextColor="#6e7a8a"
+                value={newPwd}
+                onChangeText={setNewPwd}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+
+              <Text style={s.fieldLabel}>CONFIRM NEW PASSWORD</Text>
+              <TextInput
+                style={s.input}
+                placeholder="Re-enter new password"
+                placeholderTextColor="#6e7a8a"
+                value={confirmPwd}
+                onChangeText={setConfirmPwd}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+                onSubmitEditing={handleChangePassword}
+              />
+
+              <View style={s.twoBtn}>
+                <TouchableOpacity style={s.cancelBtn} onPress={()=>setPwdModalOpen(false)}>
+                  <Text style={s.cancelBtnText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.sendBtn} onPress={handleChangePassword} disabled={changing}>
+                  {changing?<ActivityIndicator color="#000"/>:<Text style={s.sendBtnText}>Update Password</Text>}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -135,4 +268,16 @@ const s = StyleSheet.create({
   logoutBtn:    { backgroundColor:'rgba(242,78,110,.1)', borderWidth:1, borderColor:'rgba(242,78,110,.3)', borderRadius:12, padding:15, alignItems:'center', flexDirection:'row', justifyContent:'center', gap:8 },
   logoutText:   { color:'#f24e6e', fontWeight:'700', fontSize:14 },
   version:      { textAlign:'center', fontSize:12, color:'#3a4252' },
+  modalOverlay: { flex:1, backgroundColor:'rgba(0,0,0,.75)', justifyContent:'flex-end' },
+  modalBox:     { backgroundColor:'#0f1218', borderTopLeftRadius:20, borderTopRightRadius:20, padding:24 },
+  modalHeader:  { flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:18 },
+  modalTitle:   { fontSize:18, fontWeight:'800', color:'#eef0f4' },
+  modalClose:   { fontSize:18, color:'#6e7a8a', padding:4 },
+  fieldLabel:   { fontSize:11, fontWeight:'600', color:'#6e7a8a', letterSpacing:.5, marginBottom:8 },
+  input:        { backgroundColor:'#161b24', borderWidth:1, borderColor:'rgba(255,255,255,.07)', borderRadius:10, padding:13, color:'#eef0f4', fontSize:14, marginBottom:14 },
+  twoBtn:       { flexDirection:'row', gap:12, marginTop:4 },
+  cancelBtn:    { flex:1, backgroundColor:'transparent', borderWidth:1, borderColor:'rgba(255,255,255,.1)', borderRadius:10, padding:13, alignItems:'center' },
+  cancelBtnText:{ color:'#6e7a8a', fontWeight:'600' },
+  sendBtn:      { flex:1, backgroundColor:'#00c896', borderRadius:10, padding:13, alignItems:'center' },
+  sendBtnText:  { color:'#000', fontWeight:'700', fontSize:14 },
 });
