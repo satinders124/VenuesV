@@ -4,17 +4,20 @@ import {
   TouchableOpacity, Modal, TextInput, Alert, ActivityIndicator,
   KeyboardAvoidingView, Platform, ScrollView
 } from 'react-native';
-import { collection, onSnapshot, doc, getDocs, query, where, updateDoc } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { safeOnSnapshot } from '../config/firestoreHelpers';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { RefreshControl } from 'react-native';
 
 const INVITE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/inviteTeamMember';
+const REMOVE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/removeTeamMember';
+const TEAM_URL   = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
 
 type Member = { id:string; uid?:string; name:string; email:string; role:string; venue:string; venues?:string[]; };
-type Venue  = { id:string; name:string; ownerId?:string; };
+type Venue  = { id:string; name:string; ownerId?:string; assignedUids?:string[]; };
 type TabType = 'manager'|'cleaner'|'staff';
 
 const ROLE_COLOR: Record<string,string> = {
@@ -41,6 +44,7 @@ export default function TeamScreen() {
   const [search,    setSearch]    = useState('');
   const [modalOpen, setModal]     = useState(false);
   const [inviting,  setInviting]  = useState(false);
+  const [removing,  setRemoving]  = useState(false);
   const [name,      setName]      = useState('');
   const [email,     setEmail]     = useState('');
   const [role,      setRole]      = useState<TabType>('manager');
@@ -48,37 +52,58 @@ export default function TeamScreen() {
   const [venueSearch, setVenueSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
+  // Team members fetched via Cloud Function — Firestore can't structurally
+  // verify a "do we share a venue" condition for a client-side query on
+  // the users collection. See getVenueTeamMembers Cloud Function.
+  const fetchAllMembers = async (venueList: Venue[]) => {
+    try {
+      const results = await Promise.all(
+        venueList.map(v =>
+          fetch(TEAM_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
+          }).then(r => r.json()).catch(() => ({ members: [] }))
+        )
+      );
+      const allMembers = results.flatMap(r => r.members || []);
+      const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
+      setMembers(unique as Member[]);
+      setLoading(false);
+    } catch (err) {
+      console.log('fetchAllMembers error:', err);
+      setLoading(false);
+    }
+  };
+
   const onRefresh = async () => {
     setRefreshing(true);
+    if (venues.length > 0) await fetchAllMembers(venues);
     setTimeout(() => setRefreshing(false), 1000);
   };
 
   useEffect(() => {
-    const u1 = onSnapshot(collection(db,'users'), snap => {
-      setMembers(snap.docs.map(d=>({id:d.id,...d.data()})) as Member[]);
-      setLoading(false);
+    if (!user) return;
+
+    const venuesQuery = user.role === 'owner'
+      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
+      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
+
+    const u2 = safeOnSnapshot(venuesQuery, snap => {
+      const v = snap.docs.map((d: any) =>({id:d.id,...d.data()})) as Venue[];
+      setVenues(v);
+      if (v.length > 0 && !venueId) setVenueId(v[0].id);
+      fetchAllMembers(v);
     });
-    const u2 = onSnapshot(collection(db,'venues'), snap => {
-      const all = snap.docs.map(d=>({id:d.id,...d.data()})) as Venue[];
-      // Only show venues owned by this owner (or the manager's single venue)
-      const myVenues = user?.role==='owner'
-        ? all.filter(v=>v.ownerId===user.uid)
-        : all.filter(v=>v.name===user?.venue);
-      setVenues(myVenues);
-      if (myVenues.length > 0 && !venueId) setVenueId(myVenues[0].id);
-    });
-    return ()=>{u1();u2();};
-  },[]);
+
+    return ()=>{u2();};
+  },[user]);
 
   const openInvite = () => {
     setRole(activeTab); setName(''); setEmail(''); setVenueSearch('');
     setModal(true);
   };
 
-  // ── INVITE — now calls the inviteTeamMember Cloud Function (Admin SDK).
-  // This NEVER touches the caller's (owner/manager's) auth session, unlike
-  // the old client-side createUserWithEmailAndPassword which silently
-  // logged the owner out and into the new staff account.
   const inviteMember = async () => {
     if (!name||!email) { Alert.alert('Missing','Enter name and email.'); return; }
     const venueName = venues.find(v=>v.id===venueId)?.name || '';
@@ -104,6 +129,8 @@ export default function TeamScreen() {
           ? `${name} has been assigned to ${venueName}.`
           : `${name} will receive an email with login details.`
       );
+      // Refresh member list since this venue's assignedUids changed
+      await fetchAllMembers(venues);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to invite team member.');
     }
@@ -115,13 +142,25 @@ export default function TeamScreen() {
     Alert.alert('Remove Member',`Remove ${m.name} from ${targetVenue}?`,[
       {text:'Cancel',style:'cancel'},
       {text:'Remove',style:'destructive',onPress:async()=>{
-        const docId = m.uid || m.id;
-        const currentVenues: string[] = m.venues || (m.venue ? [m.venue] : []);
-        const updatedVenues = currentVenues.filter(v => v !== targetVenue);
-        await updateDoc(doc(db,'users', docId),{
-          venues: updatedVenues,
-          venue: updatedVenues.length > 0 ? updatedVenues[0] : '',
-        });
+        setRemoving(true);
+        try {
+          const docId = m.uid || m.id;
+          const resp = await fetch(REMOVE_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              targetUid: docId,
+              venueName: targetVenue,
+              callerUid: user?.uid,
+            }),
+          });
+          const result = await resp.json();
+          if (!resp.ok) throw new Error(result.error || 'Failed to remove');
+          await fetchAllMembers(venues);
+        } catch (err: any) {
+          Alert.alert('Error', err.message || 'Failed to remove team member.');
+        }
+        setRemoving(false);
       }},
     ]);
   };
@@ -133,10 +172,6 @@ export default function TeamScreen() {
 
   const shown = members
     .filter(m => m.role === activeTab)
-    .filter(m =>
-      myVenueNames.includes(m.venue) ||
-      (m.venues && m.venues.some(v => myVenueNames.includes(v)))
-    )
     .filter(m=>
       search.trim()==='' ||
       m.name?.toLowerCase().includes(search.toLowerCase()) ||
@@ -144,10 +179,7 @@ export default function TeamScreen() {
       m.venue?.toLowerCase().includes(search.toLowerCase())
     );
 
-  const memberCountInScope = members.filter(m=>
-    m.role!=='owner' &&
-    (myVenueNames.includes(m.venue) || (m.venues && m.venues.some(v=>myVenueNames.includes(v))))
-  ).length;
+  const memberCountInScope = members.filter(m=>m.role!=='owner').length;
 
   if (loading) return (
     <SafeAreaView style={s.container}>
@@ -198,7 +230,7 @@ export default function TeamScreen() {
             <Text style={[s.tabText,activeTab===t.key&&s.tabTextActive]}>{t.label}</Text>
             <View style={[s.tabCount,activeTab===t.key&&{backgroundColor:'#00c896'}]}>
               <Text style={[s.tabCountText,activeTab===t.key&&{color:'#000'}]}>
-                {members.filter(m=>m.role===t.key&&(myVenueNames.includes(m.venue)||(m.venues&&m.venues.some(v=>myVenueNames.includes(v))))).length}
+                {members.filter(m=>m.role===t.key).length}
               </Text>
             </View>
           </TouchableOpacity>
@@ -246,7 +278,7 @@ export default function TeamScreen() {
                 </Text>
               </View>
               {m.role!=='owner'&&(
-                <TouchableOpacity style={s.removeBtn} onPress={()=>{
+                <TouchableOpacity style={s.removeBtn} disabled={removing} onPress={()=>{
                   if (m.venues && m.venues.length > 1) {
                     Alert.alert(
                       'Remove from which venue?',

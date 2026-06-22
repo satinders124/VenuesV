@@ -6,6 +6,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { safeOnSnapshot } from '../config/firestoreHelpers';
 
 import { useAuth } from '../context/AuthContext';
 import { useUnread } from '../context/UnreadContext';
@@ -38,7 +39,17 @@ const TAB_OPTIONS = {
   tabBarLabelStyle: { fontSize: 11, fontWeight: '700' as const },
 };
 
-// Hook to get open issues count for current user's venue
+// Scoped venues query — owners by ownerId, everyone else by assignedUids
+// array-contains, which Firestore CAN structurally verify against the
+// security rules (unlike the previous name-matching approach).
+function getMyVenuesQuery(user: any) {
+  if (!user) return null;
+  if (user.role === 'owner') {
+    return query(collection(db, 'venues'), where('ownerId', '==', user.uid));
+  }
+  return query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
+}
+
 function useIssuesBadge() {
   const { user } = useAuth();
   const [issueCount, setIssueCount] = useState(0);
@@ -46,27 +57,21 @@ function useIssuesBadge() {
   useEffect(() => {
     if (!user) return;
 
-    const unsubVenues = onSnapshot(collection(db, 'venues'), venueSnap => {
-      const venues = venueSnap.docs.map(d => ({ id: d.id, ...d.data() })) as any[];
+    const venuesQuery = getMyVenuesQuery(user);
+    if (!venuesQuery) { setIssueCount(0); return; }
 
-      let venueIds: string[] = [];
-      if (user.role === 'owner') {
-        venueIds = venues.map(v => v.id);
-      } else {
-        const myVenue = venues.find(v => v.name === user.venue);
-        if (myVenue) venueIds = [myVenue.id];
-      }
-
+    const unsubVenues = safeOnSnapshot(venuesQuery, venueSnap => {
+      const venueIds = venueSnap.docs.map((d: any) => d.id);
       if (venueIds.length === 0) { setIssueCount(0); return; }
 
-      const unsubIssues = onSnapshot(
-        query(collection(db, 'issues'), where('status', '==', 'open')),
-        issueSnap => {
-          const count = issueSnap.docs.filter(d =>
-            venueIds.includes(d.data().venueId)
-          ).length;
-          setIssueCount(count);
-        }
+      const idsForQuery = venueIds.slice(0, 30);
+      const unsubIssues = safeOnSnapshot(
+        query(
+          collection(db, 'issues'),
+          where('status', '==', 'open'),
+          where('venueId', 'in', idsForQuery)
+        ),
+        issueSnap => setIssueCount(issueSnap.size)
       );
 
       return unsubIssues;
@@ -187,6 +192,7 @@ function AppStack() {
       <Stack.Screen name="Tabs"     component={Tabs}          />
       <Stack.Screen name="Team"     component={TeamScreen}    />
       <Stack.Screen name="AddVenue" component={AddVenueScreen}/>
+      <Stack.Screen name="Reports"  component={ReportsScreen} />
     </Stack.Navigator>
   );
 }
@@ -203,7 +209,6 @@ export default function AppNavigator() {
         ) : (
           <Stack.Screen name="Login" component={LoginScreen} />
         )}
-        <Stack.Screen name="Reports" component={ReportsScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

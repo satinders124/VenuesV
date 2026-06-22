@@ -35,9 +35,7 @@ export default function AddVenueScreen() {
   const [saving,   setSaving]   = useState(false);
 
   // For managers: need their existing venue's ownerId + that venue's own
-  // doc ID, so the new venue can be created under the same owner (and the
-  // Firestore rule can verify the chain). Owners don't need this — they
-  // just use their own uid.
+  // doc ID, so the new venue can be created under the same owner.
   const [managerOwnerId, setManagerOwnerId]       = useState<string | null>(null);
   const [managerExistingVenueId, setManagerExistingVenueId] = useState<string | null>(null);
   const [resolvingOwner, setResolvingOwner]       = useState(false);
@@ -88,13 +86,13 @@ export default function AddVenueScreen() {
         type,
         score: 100,
         ownerId: isManager ? managerOwnerId : user?.uid,
+        // The creator (owner or manager) is immediately assigned so they
+        // can see/manage the venue right after creation. assignedUids is
+        // what the Firestore security rules use for structurally-verifiable
+        // array-contains queries.
+        assignedUids: isManager && user?.uid ? [user.uid] : [],
         createdAt: serverTimestamp(),
       };
-      // Required by the Firestore rule to verify a manager's create request —
-      // not a meaningful field on the venue itself, but must be present at
-      // create time. Removed immediately after via a follow-up write isn't
-      // necessary; Firestore rules only check request.resource.data at write
-      // time, so this field DOES get stored. That's fine — harmless metadata.
       if (isManager) {
         venuePayload.existingVenueId = managerExistingVenueId;
       }

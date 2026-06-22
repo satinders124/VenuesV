@@ -1,5 +1,18 @@
 {
   "android": {
     "package": "com.satindersingh.functions"
+  },
+  "extra": {
+    "eas": {
+      "projectId": "4f7adb72-65ab-46b1-8369-343afdfba045"
+    }
+  },
+  "expo": {
+    "ios": {
+      "bundleIdentifier": "com.satindersingh.functions",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    }
   }
 }

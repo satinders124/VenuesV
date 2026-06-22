@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../config/firebase';
+import { safeOnSnapshot } from '../config/firestoreHelpers';
 import { useAuth } from '../context/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
@@ -33,7 +34,7 @@ type Issue = {
   resolvedAt?: any; resolvedNote?: string;
 };
 
-type Venue = { id: string; name: string; };
+type Venue = { id: string; name: string; ownerId?: string; };
 
 const PRIORITY_COLOR: Record<Priority, string> = {
   high:'#f24e6e', medium:'#f5a623', low:'#00c896',
@@ -48,10 +49,10 @@ export default function IssuesScreen() {
   const canResolve = user?.role === 'cleaner';
   const [refreshing, setRefreshing] = useState(false);
 
-const onRefresh = async () => {
-  setRefreshing(true);
-  setTimeout(() => setRefreshing(false), 1000);
-};
+  const onRefresh = async () => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 1000);
+  };
 
   const [venues,        setVenues]        = useState<Venue[]>([]);
   const [issues,        setIssues]        = useState<Issue[]>([]);
@@ -75,27 +76,49 @@ const onRefresh = async () => {
   const [resolvingSaving, setResolvingSaving] = useState(false);
   const [viewerPhoto,     setViewerPhoto]     = useState<string|null>(null);
 
+  // ── Scoped venues + issues query ──────────────────────
+  // Owners filter by ownerId; everyone else by their assigned venue
+  // name(s) — both match the Firestore security rules. Issues are then
+  // re-subscribed using where('venueId','in', accessibleVenueIds), which
+  // the rules can verify per-document (unlike an unfiltered scan).
   useEffect(() => {
-    const unsubVenues = onSnapshot(collection(db,'venues'), snap => {
-  const all = snap.docs.map(d=>({id:d.id,...d.data()})) as Venue[];
-  const userVenues = user?.venues || (user?.venue ? [user.venue] : []);
-  const v = user?.role==='owner' ? all : all.filter(venue=>userVenues.includes(venue.name));
-  setVenues(v);
-  if (v.length > 0) setNewVenueId(v[0].id);
+    if (!user) return;
 
-  const issuesQuery = user?.role==='owner'
-    ? query(collection(db,'issues'),orderBy('createdAt','desc'))
-    : v.length === 1
-      ? query(collection(db,'issues'),where('venueId','==',v[0].id),orderBy('createdAt','desc'))
-      : query(collection(db,'issues'),where('venueId','in',v.map(x=>x.id)),orderBy('createdAt','desc'));
+    const venuesQuery = user.role === 'owner'
+      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
+      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
 
-      onSnapshot(issuesQuery, snap2 => {
-        setIssues(snap2.docs.map(d=>({id:d.id,...d.data()})) as Issue[]);
+    let unsubIssues: (() => void) | null = null;
+
+    const unsubVenues = safeOnSnapshot(venuesQuery, snap => {
+      const v = snap.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Venue[];
+      setVenues(v);
+      if (v.length > 0 && !newVenueId) setNewVenueId(v[0].id);
+
+      if (unsubIssues) unsubIssues();
+
+      const venueIds = v.map(x => x.id).slice(0, 30);
+      if (venueIds.length === 0) {
+        setIssues([]);
+        setLoading(false);
+        return;
+      }
+
+      const issuesQuery = venueIds.length === 1
+        ? query(collection(db,'issues'), where('venueId','==',venueIds[0]), orderBy('createdAt','desc'))
+        : query(collection(db,'issues'), where('venueId','in',venueIds), orderBy('createdAt','desc'));
+
+      unsubIssues = safeOnSnapshot(issuesQuery, snap2 => {
+        setIssues(snap2.docs.map((d: any) =>({id:d.id,...d.data()})) as Issue[]);
         setLoading(false);
       });
     });
-    return unsubVenues;
-  }, []);
+
+    return () => {
+      unsubVenues();
+      if (unsubIssues) unsubIssues();
+    };
+  }, [user]);
 
   
 const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||venueId;

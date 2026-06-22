@@ -3,14 +3,17 @@ import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
   TouchableOpacity, ActivityIndicator
 } from 'react-native';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { safeOnSnapshot } from '../config/firestoreHelpers';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { RefreshControl } from 'react-native';
 
-type Venue  = { id:string; name:string; suburb:string; score:number; };
+const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
+
+type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; assignedUids?:string[]; };
 type Issue  = { id:string; status:string; priority:string; venueId:string; title:string; zone:string; by:string; createdAt:any; };
 type Member = { id:string; name:string; role:string; venue:string; venues?:string[]; };
 
@@ -24,29 +27,86 @@ export default function DashboardScreen() {
 
   const [refreshing, setRefreshing] = useState(false);
 
-const onRefresh = async () => {
-  setRefreshing(true);
-  setTimeout(() => setRefreshing(false), 1000);
-};
+  const onRefresh = async () => {
+    setRefreshing(true);
+    // Re-fetch team members on pull-to-refresh since they're no longer
+    // a live listener (see comment below on why).
+    if (venues.length > 0) await fetchAllMembers(venues);
+    setTimeout(() => setRefreshing(false), 1000);
+  };
 
   const [venues,  setVenues]  = useState<Venue[]>([]);
   const [issues,  setIssues]  = useState<Issue[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Team members are fetched via a Cloud Function (getVenueTeamMembers)
+  // instead of a live Firestore listener. This is required because
+  // Firestore security rules can't structurally verify "does this user
+  // share a venue with me" for a client-side collection query — that
+  // check has to happen server-side. Trade-off: member list is a
+  // point-in-time snapshot, refreshed on load and pull-to-refresh,
+  // not real-time.
+  const fetchAllMembers = async (venueList: Venue[]) => {
+    try {
+      const results = await Promise.all(
+        venueList.map(v =>
+          fetch(TEAM_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
+          }).then(r => r.json()).catch(() => ({ members: [] }))
+        )
+      );
+      const allMembers = results.flatMap(r => r.members || []);
+      // De-duplicate by id (a member could appear in multiple venues)
+      const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
+      setMembers(unique as Member[]);
+    } catch (err) {
+      console.log('fetchAllMembers error:', err);
+    }
+  };
+
   useEffect(() => {
-    const u1 = onSnapshot(collection(db,'venues'),  s=>{setVenues(s.docs.map(d=>({id:d.id,...d.data()})) as Venue[]);setLoading(false);});
-    const u2 = onSnapshot(collection(db,'issues'),  s=>setIssues(s.docs.map(d=>({id:d.id,...d.data()})) as Issue[]));
-    const u3 = onSnapshot(collection(db,'users'),   s=>setMembers(s.docs.map(d=>({id:d.id,...d.data()})) as Member[]));
-    return ()=>{u1();u2();u3();};
-  },[]);
+    if (!user) return;
+
+    const venuesQuery = user.role === 'owner'
+      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
+      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
+
+    let unsubIssues: (() => void) | null = null;
+
+    const u1 = safeOnSnapshot(venuesQuery, s => {
+      const venueList = s.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Venue[];
+      setVenues(venueList);
+      setLoading(false);
+
+      const venueIds = venueList.map(v => v.id);
+
+      if (unsubIssues) unsubIssues();
+      if (venueIds.length > 0) {
+        unsubIssues = safeOnSnapshot(
+          query(collection(db, 'issues'), where('venueId', 'in', venueIds.slice(0, 30))),
+          s2 => setIssues(s2.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Issue[])
+        );
+      } else {
+        setIssues([]);
+      }
+
+      fetchAllMembers(venueList);
+    });
+
+    return () => {
+      u1();
+      if (unsubIssues) unsubIssues();
+    };
+  }, [user]);
 
   const openIssues   = issues.filter(i=>i.status!=='resolved');
   const highIssues   = openIssues.filter(i=>i.priority==='high');
   const managers     = members.filter(m=>m.role==='manager');
   const staff        = members.filter(m=>m.role==='cleaner'||m.role==='staff');
 
-  // Venues that have open issues only
   const venuesWithIssues = venues.filter(v=>
     openIssues.some(i=>i.venueId===v.id)
   );
@@ -130,7 +190,7 @@ const onRefresh = async () => {
           </View>
         </View>
 
-        {/* Venue Status — only venues with open issues */}
+        {/* Venue Status */}
         <View style={s.section}>
           <Text style={s.sectionTitle}>Venue Status</Text>
           {venuesWithIssues.length===0?(

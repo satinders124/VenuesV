@@ -6,17 +6,20 @@ import {
 } from 'react-native';
 import {
   collection, onSnapshot, updateDoc, deleteDoc,
-  doc, addDoc, setDoc, serverTimestamp, getDocs, query, where
+  doc, addDoc, serverTimestamp, getDocs, query, where
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { safeOnSnapshot } from '../config/firestoreHelpers';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { RefreshControl } from 'react-native';
 
 const INVITE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/inviteTeamMember';
+const REMOVE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/removeTeamMember';
+const TEAM_URL   = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
 
-type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; };
+type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; assignedUids?:string[]; };
 type Task   = { id:string; done:boolean; venueId:string; };
 type Issue  = { id:string; status:string; priority:string; venueId:string; };
 type Zone   = { id:string; name:string; icon:string; status:string; venueId:string; };
@@ -62,11 +65,6 @@ export default function OverviewScreen() {
   const [search,  setSearch]  = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  const onRefresh = async () => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1000);
-  };
-
   const [selVenue,  setSelVenue]  = useState<Venue|null>(null);
   const [activeTab, setActiveTab] = useState<'details'|'zones'|'team'>('details');
 
@@ -90,28 +88,89 @@ export default function OverviewScreen() {
   const [memberSearch,    setMemberSearch]    = useState('');
   const [selectedMember,  setSelectedMember]  = useState<Member|null>(null);
 
+  // Team members fetched via Cloud Function — Firestore can't structurally
+  // verify "do we share a venue" for a client-side users query.
+  const fetchAllMembers = async (venueList: Venue[]) => {
+    try {
+      const results = await Promise.all(
+        venueList.map(v =>
+          fetch(TEAM_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
+          }).then(r => r.json()).catch(() => ({ members: [] }))
+        )
+      );
+      const allMembers = results.flatMap(r => r.members || []);
+      const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
+      setMembers(unique as Member[]);
+    } catch (err) {
+      console.log('fetchAllMembers error:', err);
+    }
+  };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    if (venues.length > 0) await fetchAllMembers(venues);
+    setTimeout(() => setRefreshing(false), 1000);
+  };
+
+  // ── Scoped venues query + cascading tasks/issues/zones ──
   useEffect(() => {
-    const u1 = onSnapshot(collection(db,'venues'), s=>{
-      const all = s.docs.map(d=>({id:d.id,...d.data()})) as Venue[];
-      const userVenues = (user as any)?.venues || (user?.venue ? [user.venue] : []);
-      const filtered = user?.role==='owner'
-        ? all.filter((v:any)=>v.ownerId===user.uid)
-        : all.filter(v=>userVenues.includes(v.name));
-      setVenues(filtered);
+    if (!user) return;
+
+    const venuesQuery = user.role === 'owner'
+      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
+      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
+
+    let unsubTasks: (() => void) | null = null;
+    let unsubIssues: (() => void) | null = null;
+    let unsubZones: (() => void) | null = null;
+
+    const u1 = safeOnSnapshot(venuesQuery, s => {
+      const venueList = s.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Venue[];
+      setVenues(venueList);
       setLoading(false);
-      // Update selVenue if it's open — keeps team tab in sync
+
       setSelVenue(prev => {
         if (!prev) return prev;
-        const updated = all.find(v=>v.id===prev.id);
+        const updated = venueList.find(v => v.id === prev.id);
         return updated || prev;
       });
+
+      const venueIds = venueList.map(v => v.id).slice(0, 30);
+
+      if (unsubTasks) unsubTasks();
+      if (unsubIssues) unsubIssues();
+      if (unsubZones) unsubZones();
+
+      if (venueIds.length > 0) {
+        unsubTasks = safeOnSnapshot(
+          query(collection(db, 'tasks'), where('venueId', 'in', venueIds)),
+          s2 => setTasks(s2.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Task[])
+        );
+        unsubIssues = safeOnSnapshot(
+          query(collection(db, 'issues'), where('venueId', 'in', venueIds)),
+          s3 => setIssues(s3.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Issue[])
+        );
+        unsubZones = safeOnSnapshot(
+          query(collection(db, 'zones'), where('venueId', 'in', venueIds)),
+          s4 => setZones(s4.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Zone[])
+        );
+      } else {
+        setTasks([]); setIssues([]); setZones([]);
+      }
+
+      fetchAllMembers(venueList);
     });
-    const u2 = onSnapshot(collection(db,'tasks'),   s=>setTasks(s.docs.map(d=>({id:d.id,...d.data()})) as Task[]));
-    const u3 = onSnapshot(collection(db,'issues'),  s=>setIssues(s.docs.map(d=>({id:d.id,...d.data()})) as Issue[]));
-    const u4 = onSnapshot(collection(db,'zones'),   s=>setZones(s.docs.map(d=>({id:d.id,...d.data()})) as Zone[]));
-    const u5 = onSnapshot(collection(db,'users'),   s=>setMembers(s.docs.map(d=>({id:d.id,...d.data()})) as Member[]));
-    return ()=>{u1();u2();u3();u4();u5();};
-  },[]);
+
+    return () => {
+      u1();
+      if (unsubTasks) unsubTasks();
+      if (unsubIssues) unsubIssues();
+      if (unsubZones) unsubZones();
+    };
+  }, [user]);
 
   const vStats = (v:Venue) => {
     const vT = tasks.filter(t=>t.venueId===v.id);
@@ -165,19 +224,28 @@ export default function OverviewScreen() {
     Alert.alert('Remove Member',`Remove ${m.name} from ${selVenue?.name}?`,[
       {text:'Cancel',style:'cancel'},
       {text:'Remove',style:'destructive',onPress:async()=>{
-        const docId = m.uid || m.id;
-        const currentVenues: string[] = m.venues || (m.venue ? [m.venue] : []);
-        const updatedVenues = currentVenues.filter(v=>v!==selVenue?.name);
-        await updateDoc(doc(db,'users',docId),{
-          venues: updatedVenues,
-          venue: updatedVenues.length>0 ? updatedVenues[0] : '',
-        });
+        try {
+          const docId = m.uid || m.id;
+          const resp = await fetch(REMOVE_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              targetUid: docId,
+              venueName: selVenue?.name,
+              callerUid: user?.uid,
+            }),
+          });
+          const result = await resp.json();
+          if (!resp.ok) throw new Error(result.error || 'Failed to remove');
+          await fetchAllMembers(venues);
+        } catch (err: any) {
+          Alert.alert('Error', err.message || 'Failed to remove team member.');
+        }
       }},
     ]);
   };
 
-  // ── INVITE — now calls the inviteTeamMember Cloud Function (Admin SDK).
-  // Same fix as TeamScreen: never touches the caller's auth session.
+  // ── INVITE — calls the inviteTeamMember Cloud Function. ──
   const inviteMember = async () => {
     if (!inviteName||!inviteEmail) {Alert.alert('Missing','Enter name and email.');return;}
     if (!selVenue) {Alert.alert('Missing','No venue selected.');return;}
@@ -204,6 +272,7 @@ export default function OverviewScreen() {
           ? `${inviteName} has been assigned to ${selVenue.name}.`
           : `${inviteName} will receive an email with login details.`
       );
+      await fetchAllMembers(venues);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to invite team member.');
     }
@@ -275,7 +344,7 @@ export default function OverviewScreen() {
           )}
         </View>
 
-        {/* Summary bar — 3 items only, no Attention */}
+        {/* Summary bar */}
         <View style={s.summaryBar}>
           {[
             ['Avg Score', avgScore+'%',  '#00c896'],
@@ -322,7 +391,6 @@ export default function OverviewScreen() {
                 ))}
               </View>
 
-              {/* High priority warning — clickable → Issues tab */}
               {st.highIssues>0&&(
                 <TouchableOpacity
                   style={s.warningBanner}
@@ -336,7 +404,6 @@ export default function OverviewScreen() {
                 </TouchableOpacity>
               )}
 
-              {/* Manage — owner and manager */}
               {isOwnerOrManager&&(
                 <TouchableOpacity style={s.manageBtn} onPress={()=>openVenue(v)}>
                   <Text style={s.manageBtnText}>Manage Venue →</Text>
@@ -403,16 +470,16 @@ export default function OverviewScreen() {
                           const venueName = selVenue!.name;
 
                           const issuesSnap = await getDocs(query(collection(db,'issues'),where('venueId','==',venueId)));
-                          await Promise.all(issuesSnap.docs.map(d=>deleteDoc(doc(db,'issues',d.id))));
+                          await Promise.all(issuesSnap.docs.map((d: any) =>deleteDoc(doc(db,'issues',d.id))));
 
                           const tasksSnap = await getDocs(query(collection(db,'tasks'),where('venueId','==',venueId)));
-                          await Promise.all(tasksSnap.docs.map(d=>deleteDoc(doc(db,'tasks',d.id))));
+                          await Promise.all(tasksSnap.docs.map((d: any) =>deleteDoc(doc(db,'tasks',d.id))));
 
                           const zonesSnap = await getDocs(query(collection(db,'zones'),where('venueId','==',venueId)));
-                          await Promise.all(zonesSnap.docs.map(d=>deleteDoc(doc(db,'zones',d.id))));
+                          await Promise.all(zonesSnap.docs.map((d: any) =>deleteDoc(doc(db,'zones',d.id))));
 
                           const usersSnap = await getDocs(query(collection(db,'users'),where('venue','==',venueName)));
-                          await Promise.all(usersSnap.docs.map(d=>updateDoc(doc(db,'users',d.id),{venue:''})));
+                          await Promise.all(usersSnap.docs.map((d: any) =>updateDoc(doc(db,'users',d.id),{venue:''})));
 
                           await deleteDoc(doc(db,'venues',venueId));
                           setSelVenue(null);
@@ -505,7 +572,6 @@ export default function OverviewScreen() {
                 {activeTab==='team'&&(
 
                   <View style={s.tabContent}>
-                    {/* Existing team members */}
                     {members.filter(m=>
                       m.venue===selVenue?.name ||
                       (m.venues && m.venues.includes(selVenue?.name||''))
@@ -545,7 +611,6 @@ export default function OverviewScreen() {
                       <Text style={s.inviteTitle}>Add Team Member</Text>
                     </View>
 
-                    {/* Role selector */}
                     <Text style={s.fieldLabel}>ROLE</Text>
                     <View style={s.roleRow}>
                       {INVITE_ROLES.map(r=>(
@@ -555,7 +620,9 @@ export default function OverviewScreen() {
                       ))}
                     </View>
 
-                    {/* Search existing users */}
+                    {/* Search existing users — now scoped to fetched members,
+                        which are already limited to your accessible venues
+                        (no cross-tenant search). */}
                     <Text style={s.fieldLabel}>SEARCH EXISTING MEMBERS</Text>
                     <View style={s.searchBarInline}>
                       <Text style={{fontSize:14,color:'#6e7a8a'}}>⌕</Text>
@@ -573,7 +640,6 @@ export default function OverviewScreen() {
                       )}
                     </View>
 
-                    {/* Search results */}
                     {memberSearch.length>1&&(
                       <View style={s.searchResults}>
                         {members
@@ -619,25 +685,33 @@ export default function OverviewScreen() {
                       </View>
                     )}
 
-                    {/* Add selected member button — appends to venues array, never overwrites */}
+                    {/* Add selected member — uses inviteTeamMember Cloud
+                        Function so assignedUids stays in sync. */}
                     {selectedMember&&(
                       <TouchableOpacity style={s.saveBtn} onPress={async()=>{
                         setSavingDetails(true);
-                        const docId = selectedMember.uid || selectedMember.id;
-                        const currentVenues: string[] = selectedMember.venues
-                          || (selectedMember.venue ? [selectedMember.venue] : []);
-                        const updatedVenues = currentVenues.includes(selVenue!.name)
-                          ? currentVenues
-                          : [...currentVenues, selVenue!.name];
-                        await updateDoc(doc(db,'users',docId),{
-                          venues: updatedVenues,
-                          venue: selectedMember.venue || selVenue!.name,
-                          role: inviteRole,
-                        });
-                        setSelectedMember(null);
-                        setMemberSearch('');
+                        try {
+                          const resp = await fetch(INVITE_URL, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              email: selectedMember.email,
+                              name: selectedMember.name,
+                              role: inviteRole,
+                              venue: selVenue!.name,
+                              callerUid: user?.uid,
+                            }),
+                          });
+                          const result = await resp.json();
+                          if (!resp.ok) throw new Error(result.error || 'Failed');
+                          setSelectedMember(null);
+                          setMemberSearch('');
+                          await fetchAllMembers(venues);
+                          Alert.alert('Done',`${selectedMember.name} added to ${selVenue!.name}`);
+                        } catch (err: any) {
+                          Alert.alert('Error', err.message || 'Failed to add member.');
+                        }
                         setSavingDetails(false);
-                        Alert.alert('Done',`${selectedMember.name} added to ${selVenue!.name}`);
                       }} disabled={savingDetails}>
                         {savingDetails
                           ?<ActivityIndicator color="#000"/>
@@ -646,7 +720,6 @@ export default function OverviewScreen() {
                       </TouchableOpacity>
                     )}
 
-                    {/* Divider for new invite */}
                     <View style={{borderTopWidth:1,borderTopColor:'rgba(255,255,255,.07)',paddingTop:14,marginTop:8}}>
                       <Text style={[s.fieldLabel,{marginBottom:12}]}>OR INVITE NEW MEMBER</Text>
                     </View>

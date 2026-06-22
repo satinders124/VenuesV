@@ -3,8 +3,9 @@ import {
   View, Text, StyleSheet, SafeAreaView, FlatList,
   TouchableOpacity, ActivityIndicator, TextInput
 } from 'react-native';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { safeOnSnapshot } from '../config/firestoreHelpers';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -12,7 +13,9 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { RefreshControl } from 'react-native';
 
-type Venue  = { id:string; name:string; suburb:string; score:number; };
+const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
+
+type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; assignedUids?:string[]; };
 type Task   = { id:string; done:boolean; venueId:string; title:string; frequency:string; };
 type Issue  = { id:string; status:string; priority:string; venueId:string; title:string; by:string; };
 type Member = { id:string; name:string; role:string; venue:string; venues?:string[]; };
@@ -30,18 +33,75 @@ export default function ReportsScreen() {
   const [search,     setSearch]     = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-const onRefresh = async () => {
-  setRefreshing(true);
-  setTimeout(() => setRefreshing(false), 1000);
-};
+  // Team members fetched via Cloud Function — see DashboardScreen for
+  // the full explanation of why this can't be a live Firestore listener.
+  const fetchAllMembers = async (venueList: Venue[]) => {
+    try {
+      const results = await Promise.all(
+        venueList.map(v =>
+          fetch(TEAM_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
+          }).then(r => r.json()).catch(() => ({ members: [] }))
+        )
+      );
+      const allMembers = results.flatMap(r => r.members || []);
+      const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
+      setMembers(unique as Member[]);
+    } catch (err) {
+      console.log('fetchAllMembers error:', err);
+    }
+  };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    if (venues.length > 0) await fetchAllMembers(venues);
+    setTimeout(() => setRefreshing(false), 1000);
+  };
 
   useEffect(() => {
-    const u1 = onSnapshot(collection(db,'venues'),  s=>{setVenues(s.docs.map(d=>({id:d.id,...d.data()})) as Venue[]);setLoading(false);});
-    const u2 = onSnapshot(collection(db,'tasks'),   s=>setTasks(s.docs.map(d=>({id:d.id,...d.data()})) as Task[]));
-    const u3 = onSnapshot(collection(db,'issues'),  s=>setIssues(s.docs.map(d=>({id:d.id,...d.data()})) as Issue[]));
-    const u4 = onSnapshot(collection(db,'users'),   s=>setMembers(s.docs.map(d=>({id:d.id,...d.data()})) as Member[]));
-    return ()=>{u1();u2();u3();u4();};
-  },[]);
+    if (!user) return;
+
+    const venuesQuery = user.role === 'owner'
+      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
+      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
+
+    let unsubTasks: (() => void) | null = null;
+    let unsubIssues: (() => void) | null = null;
+
+    const u1 = safeOnSnapshot(venuesQuery, s => {
+      const venueList = s.docs.map((d: any) =>({id:d.id,...d.data()})) as Venue[];
+      setVenues(venueList);
+      setLoading(false);
+
+      const venueIds = venueList.map(v => v.id).slice(0, 30);
+
+      if (unsubTasks) unsubTasks();
+      if (unsubIssues) unsubIssues();
+
+      if (venueIds.length > 0) {
+        unsubTasks = safeOnSnapshot(
+          query(collection(db,'tasks'), where('venueId','in',venueIds)),
+          s2 => setTasks(s2.docs.map((d: any) =>({id:d.id,...d.data()})) as Task[])
+        );
+        unsubIssues = safeOnSnapshot(
+          query(collection(db,'issues'), where('venueId','in',venueIds)),
+          s3 => setIssues(s3.docs.map((d: any) =>({id:d.id,...d.data()})) as Issue[])
+        );
+      } else {
+        setTasks([]); setIssues([]);
+      }
+
+      fetchAllMembers(venueList);
+    });
+
+    return () => {
+      u1();
+      if (unsubTasks) unsubTasks();
+      if (unsubIssues) unsubIssues();
+    };
+  }, [user]);
 
   const generatePDF = async (venue: Venue) => {
     setGenerating(venue.id);
@@ -251,7 +311,6 @@ const onRefresh = async () => {
         </View>
       </View>
 
-      {/* Search */}
       <View style={s.searchBar}>
         <Ionicons name="search-outline" color="#6e7a8a" size={18}/>
         <TextInput

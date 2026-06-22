@@ -6,9 +6,10 @@ import {
 } from 'react-native';
 import {
   collection, onSnapshot, addDoc, updateDoc,
-  deleteDoc, doc, serverTimestamp
+  deleteDoc, doc, serverTimestamp, query, where
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { safeOnSnapshot } from '../config/firestoreHelpers';
 import { useAuth } from '../context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
 import { notifyTaskCreated } from '../config/notifications';
@@ -23,7 +24,7 @@ type Task = {
   icon: string; done: boolean; assignedTo: string; venueId: string;
 };
 
-type Venue = { id: string; name: string; };
+type Venue = { id: string; name: string; ownerId?: string; };
 
 const PRIORITY_COLOR: Record<Priority, string> = {
   high:'#f24e6e', medium:'#f5a623', low:'#00c896',
@@ -44,10 +45,10 @@ export default function TasksScreen() {
   const isCleaner = user?.role === 'cleaner';
   const [refreshing, setRefreshing] = useState(false);
 
-const onRefresh = async () => {
-  setRefreshing(true);
-  setTimeout(() => setRefreshing(false), 1000);
-};
+  const onRefresh = async () => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 1000);
+  };
 
   const [venues,      setVenues]     = useState<Venue[]>([]);
   const [tasks,       setTasks]      = useState<Task[]>([]);
@@ -65,22 +66,38 @@ const onRefresh = async () => {
   const [fPrio,    setFPrio]    = useState<Priority>('medium');
   const [fIcon,    setFIcon]    = useState('🧹');
 
+  // ── Scoped venues + tasks query ───────────────────────
   useEffect(() => {
-    const u1 = onSnapshot(collection(db,'venues'), snap => {
-  const all = snap.docs.map(d=>({id:d.id,...d.data()})) as Venue[];
-  const userVenues = user?.venues || (user?.venue ? [user.venue] : []);
-const filtered = user?.role === 'owner'
-  ? all
-  : all.filter(v => userVenues.includes(v.name));
-  setVenues(filtered);
-  if (filtered.length > 0 && !activeVenue) setActiveVenue(filtered[0].id);
-});
-    const u2 = onSnapshot(collection(db,'tasks'), snap => {
-      setTasks(snap.docs.map(d=>({id:d.id,...d.data()})) as Task[]);
-      setLoading(false);
+    if (!user) return;
+
+    const venuesQuery = user.role === 'owner'
+      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
+      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
+
+    let unsubTasks: (() => void) | null = null;
+
+    const u1 = safeOnSnapshot(venuesQuery, snap => {
+      const filtered = snap.docs.map((d: any) =>({id:d.id,...d.data()})) as Venue[];
+      setVenues(filtered);
+      if (filtered.length > 0 && !activeVenue) setActiveVenue(filtered[0].id);
+
+      if (unsubTasks) unsubTasks();
+      const venueIds = filtered.map(v => v.id).slice(0, 30);
+      if (venueIds.length > 0) {
+        unsubTasks = safeOnSnapshot(
+          query(collection(db,'tasks'), where('venueId','in',venueIds)),
+          snap2 => {
+            setTasks(snap2.docs.map((d: any) =>({id:d.id,...d.data()})) as Task[]);
+            setLoading(false);
+          }
+        );
+      } else {
+        setTasks([]);
+        setLoading(false);
+      }
     });
-    return () => { u1(); u2(); };
-  }, []);
+    return () => { u1(); if (unsubTasks) unsubTasks(); };
+  }, [user]);
 
   const completeTask   = (id:string) => updateDoc(doc(db,'tasks',id),{done:true});
   const uncompleteTask = (id:string) => updateDoc(doc(db,'tasks',id),{done:false});

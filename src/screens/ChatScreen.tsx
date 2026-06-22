@@ -6,15 +6,18 @@ import {
 } from 'react-native';
 import {
   collection, addDoc, onSnapshot, query,
-  orderBy, serverTimestamp
+  orderBy, serverTimestamp, where
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { safeOnSnapshot } from '../config/firestoreHelpers';
 import { useAuth } from '../context/AuthContext';
 import { useUnread } from '../context/UnreadContext';
 import { Ionicons } from '@expo/vector-icons';
 
+const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
+
 type Message  = { id:string; text:string; senderName:string; senderRole:string; createdAt:any; };
-type Venue    = { id:string; name:string; suburb:string; };
+type Venue    = { id:string; name:string; suburb:string; ownerId?:string; assignedUids?:string[]; };
 type Member   = { id:string; name:string; role:string; email:string; venue:string; venues?:string[]; };
 type ChatRoom = { id:string; name:string; subtitle:string; type:'venue'|'dm'; avatar:string; avatarColor:string; };
 type FilterType = 'venues'|'staff'|'cleaners'|'manager';
@@ -49,25 +52,52 @@ export default function ChatScreen() {
   const getInitials = (name:string) =>
     name?.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2)||'?';
 
-  // Load venues and members
+  // Team members fetched via Cloud Function — same reasoning as
+  // DashboardScreen/UnreadContext: Firestore can't structurally verify
+  // a "do we share a venue" condition for a client-side collection query.
+  const fetchAllMembers = async (venueList: Venue[]) => {
+    try {
+      const results = await Promise.all(
+        venueList.map(v =>
+          fetch(TEAM_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
+          }).then(r => r.json()).catch(() => ({ members: [] }))
+        )
+      );
+      const allMembers = results.flatMap(r => r.members || []);
+      const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
+      setMembers(unique as Member[]);
+    } catch (err) {
+      console.log('fetchAllMembers error:', err);
+    }
+  };
+
+  // ── Scoped venues query ───────────────────────────────
   useEffect(() => {
-    const u1 = onSnapshot(collection(db,'venues'), snap => {
-      setVenues(snap.docs.map(d=>({id:d.id,...d.data()})) as Venue[]);
+    if (!user) return;
+
+    const venuesQuery = user.role === 'owner'
+      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
+      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
+
+    const u1 = safeOnSnapshot(venuesQuery, snap => {
+      const v = snap.docs.map((d: any) =>({id:d.id,...d.data()})) as Venue[];
+      setVenues(v);
       setLoading(false);
+      fetchAllMembers(v);
     });
-    const u2 = onSnapshot(collection(db,'users'), snap => {
-      setMembers(snap.docs.map(d=>({id:d.id,...d.data()})) as Member[]);
-    });
-    return ()=>{u1();u2();};
-  }, []);
+    return ()=>{ u1(); };
+  }, [user]);
 
   // Load messages for active room
   useEffect(() => {
     if (!activeRoom) return;
     markRoomRead(activeRoom.id);
     const q = query(collection(db,'chats',activeRoom.id,'messages'),orderBy('createdAt','asc'));
-    const unsub = onSnapshot(q, snap => {
-      setMessages(snap.docs.map(d=>({id:d.id,...d.data()})) as Message[]);
+    const unsub = safeOnSnapshot(q, snap => {
+      setMessages(snap.docs.map((d: any) =>({id:d.id,...d.data()})) as Message[]);
       setTimeout(()=>listRef.current?.scrollToEnd({animated:true}),100);
       markRoomRead(activeRoom.id);
     });
@@ -110,13 +140,10 @@ export default function ChatScreen() {
   const getChatRooms = (): ChatRoom[] => {
     if (isWorker) {
       if (filter === 'venues') {
-        const userVenues = user?.venues || (user?.venue ? [user.venue] : []);
-return venues
-  .filter(v => userVenues.includes(v.name))
-          .map(v=>({
-            id:v.id, name:v.name, subtitle:'Group Chat · All team',
-            type:'venue' as const, avatar:v.name.charAt(0), avatarColor:'#00c896',
-          }));
+        return venues.map(v=>({
+          id:v.id, name:v.name, subtitle:'Group Chat · All team',
+          type:'venue' as const, avatar:v.name.charAt(0), avatarColor:'#00c896',
+        }));
       }
       if (filter === 'manager') {
         return members
@@ -129,12 +156,10 @@ return venues
       return [];
     }
     if (filter==='venues') {
-      return venues
-        .filter(v => user?.role==='owner' ? true : v.name===user?.venue)
-        .map(v=>({
-          id:v.id, name:v.name, subtitle:v.suburb||'Group Chat',
-          type:'venue' as const, avatar:v.name.charAt(0), avatarColor:'#00c896',
-        }));
+      return venues.map(v=>({
+        id:v.id, name:v.name, subtitle:v.suburb||'Group Chat',
+        type:'venue' as const, avatar:v.name.charAt(0), avatarColor:'#00c896',
+      }));
     }
     const role = filter==='staff'?'staff':'cleaner';
     return members

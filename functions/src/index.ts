@@ -2,6 +2,7 @@ import * as admin from 'firebase-admin';
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import { onRequest } from 'firebase-functions/v2/https';
 import { defineSecret } from 'firebase-functions/params';
+import { onSchedule } from 'firebase-functions/v2/scheduler';
 
 admin.initializeApp();
 
@@ -69,7 +70,6 @@ const baseTemplate = (content: string) => `
 </body>
 </html>`;
 
-// ── OTP EMAIL TEMPLATE ────────────────────────────────────
 const otpTemplate = (name: string, code: string) =>
   baseTemplate(`
     <h2 class="title">Verify your email 📧</h2>
@@ -87,7 +87,6 @@ const otpTemplate = (name: string, code: string) =>
     </p>
   `);
 
-// ── INVITE TEMPLATE ───────────────────────────────────────
 const inviteTemplate = (name: string, venueName: string, role: string, tempPassword: string) =>
   baseTemplate(`
     <h2 class="title">You've been invited! 🎉</h2>
@@ -111,7 +110,6 @@ const inviteTemplate = (name: string, venueName: string, role: string, tempPassw
     <p class="text" style="font-size:13px;color:#999">Please change your password after first login. Questions? Email <a href="mailto:hello@venuesv.com" style="color:#00c896">hello@venuesv.com</a></p>
   `);
 
-// ── WELCOME OWNER TEMPLATE ────────────────────────────────
 const welcomeOwnerTemplate = (name: string) =>
   baseTemplate(`
     <h2 class="title">Thanks for signing up! 🎉</h2>
@@ -144,7 +142,6 @@ const welcomeOwnerTemplate = (name: string) =>
     </p>
   `);
 
-// ── CREDENTIALS TEMPLATE ──────────────────────────────────
 const credentialsTemplate = (name: string, email: string, password: string) =>
   baseTemplate(`
     <h2 class="title">Your login credentials are ready! 🚀</h2>
@@ -171,12 +168,48 @@ const credentialsTemplate = (name: string, email: string, password: string) =>
     </p>
   `);
 
+const confirmationReadyTemplate = (name: string, email: string) =>
+  baseTemplate(`
+    <h2 class="title">Your dashboard is ready! 🚀</h2>
+    <p class="text">Hi <strong>${name}</strong>, your Venues V dashboard is all set up and ready to go.</p>
+    <div class="info-box">
+      <div class="info-row"><span class="info-label">Email</span><span class="info-val">${email}</span></div>
+      <div class="info-row"><span class="info-label">Password</span><span class="info-val">The one you created at signup</span></div>
+      <div class="info-row"><span class="info-label">App</span><span class="info-val">Venues V (iOS & Android)</span></div>
+      <div class="info-row"><span class="info-label">Dashboard</span><span class="info-val">client.venuesv.com</span></div>
+    </div>
+    <p class="text">To get started:</p>
+    <div class="steps">
+      <div class="step"><div class="step-num">1</div><div class="step-text">Download the <strong>Venues V</strong> app from the App Store or Google Play</div></div>
+      <div class="step"><div class="step-num">2</div><div class="step-text">Sign in with your email and the password you created during signup</div></div>
+      <div class="step"><div class="step-num">3</div><div class="step-text">Add your venue — tap <strong>More → Add Venue</strong></div></div>
+      <div class="step"><div class="step-num">4</div><div class="step-text">Invite your team — tap <strong>More → Team</strong></div></div>
+      <div class="step"><div class="step-num">5</div><div class="step-text">Access your owner dashboard at <strong>client.venuesv.com</strong></div></div>
+    </div>
+    <a href="https://client.venuesv.com" class="btn">Open Owner Dashboard →</a>
+    <div class="divider"></div>
+    <p class="text" style="font-size:13px;color:#999">
+      Forgot your password? Use <strong>Forgot password?</strong> on the app login screen.<br/>
+      Need help? Reply to this email or contact <a href="mailto:hello@venuesv.com" style="color:#00c896">hello@venuesv.com</a>
+    </p>
+  `);
+
+const passwordResetTemplate = (name: string, resetLink: string) =>
+  baseTemplate(`
+    <h2 class="title">Reset your password 🔑</h2>
+    <p class="text">Hi <strong>${name}</strong>, we received a request to reset your Venues V password.</p>
+    <p class="text">Click the button below to choose a new password:</p>
+    <a href="${resetLink}" class="btn">Reset Password →</a>
+    <div class="divider"></div>
+    <p class="text" style="font-size:13px;color:#999">
+      This link will expire shortly for security reasons. If you didn't request this, you can safely ignore this email — your password will not be changed.<br/>
+      Questions? Email <a href="mailto:hello@venuesv.com" style="color:#00c896">hello@venuesv.com</a>
+    </p>
+  `);
+
 // ── SEND OTP ──────────────────────────────────────────────
 export const sendOTP = onRequest(
-  {
-    cors: true,
-    secrets: [SENDGRID_KEY],
-  },
+  { cors: true, secrets: [SENDGRID_KEY] },
   async (req, res) => {
     if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
     const { email, name } = req.body;
@@ -224,25 +257,28 @@ export const verifyOTP = onRequest(
 
 // ── SEND CREDENTIALS ──────────────────────────────────────
 export const sendCredentials = onRequest(
-  {
-    cors: true,
-    secrets: [SENDGRID_KEY],
-  },
+  { cors: true, secrets: [SENDGRID_KEY] },
   async (req, res) => {
     if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
     const { email, name, password, adminKey } = req.body;
     if (adminKey !== 'venuesv-admin-2026') { res.status(401).json({ error: 'Unauthorised' }); return; }
-    if (!email || !name || !password) { res.status(400).json({ error: 'Email, name and password required' }); return; }
+    // password is OPTIONAL. With a password -> show it (credentials email).
+    // Without -> confirmation email telling them to use their signup password.
+    if (!email || !name) { res.status(400).json({ error: 'Email and name required' }); return; }
     try {
       const sgMail = require('@sendgrid/mail');
       sgMail.setApiKey(SENDGRID_KEY.value());
       await sgMail.send({
         to: email,
         from: { email: FROM_EMAIL, name: FROM_NAME },
-        subject: `Your Venues V login credentials are ready 🚀`,
-        html: credentialsTemplate(name, email, password),
+        subject: password
+          ? `Your Venues V login credentials are ready 🚀`
+          : `Your Venues V dashboard is ready 🚀`,
+        html: password
+          ? credentialsTemplate(name, email, password)
+          : confirmationReadyTemplate(name, email),
       });
-      console.log(`Credentials sent to: ${email}`);
+      console.log(`Confirmation/credentials sent to: ${email}`);
       res.status(200).json({ success: true });
     } catch (err) {
       console.error('Credentials error:', err);
@@ -253,10 +289,7 @@ export const sendCredentials = onRequest(
 
 // ── ON USER CREATED ───────────────────────────────────────
 export const onUserCreated = onDocumentCreated(
-  {
-    document: 'users/{userId}',
-    secrets: [SENDGRID_KEY],
-  },
+  { document: 'users/{userId}', secrets: [SENDGRID_KEY] },
   async (event) => {
     const data = event.data?.data();
     if (!data?.email || !data?.name) return null;
@@ -267,6 +300,31 @@ export const onUserCreated = onDocumentCreated(
     };
     try {
       if (data.role === 'owner') {
+        // Write the signupLeads doc server-side (client can't — rule is
+        // 'if false'). This is what the admin panel + onNewSignup read.
+        // Guard against duplicates if a lead with this uid already exists.
+        const uid = event.params.userId;
+        const existingLead = await admin.firestore()
+          .collection('signupLeads').where('uid', '==', uid).limit(1).get();
+        if (existingLead.empty) {
+          const now = new Date();
+          const trialEnd = (data as any).trialEndsAt
+            ?? admin.firestore.Timestamp.fromDate(
+                 new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000));
+          await admin.firestore().collection('signupLeads').add({
+            uid,
+            name: data.name,
+            email: data.email,
+            phone: (data as any).phone || '',
+            plan: (data as any).plan || '$19.99/week',
+            trialEndsAt: trialEnd,
+            marketingOptIn: (data as any).marketingOptIn ?? false,
+            status: 'trial_started',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          console.log(`signupLead created for owner: ${data.email}`);
+        }
+
         await sgMail.send({
           to: data.email, from: { email: FROM_EMAIL, name: FROM_NAME },
           subject: `Thanks for signing up with Venues V, ${data.name.split(' ')[0]}!`,
@@ -288,10 +346,7 @@ export const onUserCreated = onDocumentCreated(
 
 // ── ON NEW SIGNUP ALERT ───────────────────────────────────
 export const onNewSignup = onDocumentCreated(
-  {
-    document: 'signupLeads/{leadId}',
-    secrets: [SENDGRID_KEY],
-  },
+  { document: 'signupLeads/{leadId}', secrets: [SENDGRID_KEY] },
   async (event) => {
     const data = event.data?.data();
     if (!data?.email || !data?.name) return null;
@@ -328,63 +383,38 @@ export const onNewSignup = onDocumentCreated(
 
 // ── CREATE AUTH USER (called from admin panel) ────────────
 export const createAuthUser = onRequest(
-  {
-    cors: true,
-    secrets: [SENDGRID_KEY],
-  },
+  { cors: true, secrets: [SENDGRID_KEY] },
   async (req, res) => {
     if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
-
     const { email, name, password, adminKey, docId } = req.body;
-
-    if (adminKey !== 'venuesv-admin-2026') {
-      res.status(401).json({ error: 'Unauthorised' }); return;
-    }
-    if (!email || !name || !password) {
-      res.status(400).json({ error: 'Email, name and password required' }); return;
-    }
+    if (adminKey !== 'venuesv-admin-2026') { res.status(401).json({ error: 'Unauthorised' }); return; }
+    if (!email || !name || !password) { res.status(400).json({ error: 'Email, name and password required' }); return; }
 
     try {
-      // Create Firebase Auth account using Admin SDK
       let uid: string;
       try {
-        const userRecord = await admin.auth().createUser({
-          email,
-          password,
-          displayName: name,
-        });
+        const userRecord = await admin.auth().createUser({ email, password, displayName: name });
         uid = userRecord.uid;
       } catch (authErr: any) {
         if (authErr.code === 'auth/email-already-exists') {
-          // User already exists — get their UID
           const existing = await admin.auth().getUserByEmail(email);
           uid = existing.uid;
-          // Update their password
           await admin.auth().updateUser(uid, { password });
         } else {
           throw authErr;
         }
       }
 
-      // Update the signupLeads doc with uid
       if (docId) {
         await admin.firestore().collection('signupLeads').doc(docId).update({ uid });
       }
 
-      // Create or update users doc with correct uid
       await admin.firestore().collection('users').doc(uid).set({
-        uid,
-        name,
-        email,
-        role: 'owner',
-        venue: '',
-        venues: [],
-        subscriptionStatus: 'trial',
+        uid, name, email, role: 'owner', venue: '', venues: [], subscriptionStatus: 'trial',
       }, { merge: true });
 
       console.log(`Auth account created for: ${email} uid: ${uid}`);
       res.status(200).json({ success: true, uid });
-
     } catch (err: any) {
       console.error('createAuthUser error:', err);
       res.status(500).json({ error: err.message || 'Failed to create account' });
@@ -392,27 +422,146 @@ export const createAuthUser = onRequest(
   }
 );
 
-// ── INVITE TEAM MEMBER (called from app — Team/Overview screens) ──
-// Replaces client-side createUserWithEmailAndPassword, which was
-// silently signing the OWNER out and into the new staff account.
-// Admin SDK creates the Auth user server-side without touching any
-// client session, and always writes the Firestore doc at users/{uid}.
-export const inviteTeamMember = onRequest(
-  {
-    cors: true,
-    secrets: [SENDGRID_KEY],
-  },
+// ── SEND PASSWORD RESET ───────────────────────────────────
+export const sendPasswordReset = onRequest(
+  { cors: true, secrets: [SENDGRID_KEY] },
   async (req, res) => {
     if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
+    const { email } = req.body;
+    if (!email) { res.status(400).json({ error: 'Email required' }); return; }
 
+    try {
+      const userRecord = await admin.auth().getUserByEmail(email);
+      const resetLink = await admin.auth().generatePasswordResetLink(email, { url: 'https://venuesv.com' });
+      const sgMail = require('@sendgrid/mail');
+      sgMail.setApiKey(SENDGRID_KEY.value());
+      await sgMail.send({
+        to: email,
+        from: { email: FROM_EMAIL, name: FROM_NAME },
+        subject: `Reset your Venues V password 🔑`,
+        html: passwordResetTemplate(userRecord.displayName || 'there', resetLink),
+      });
+      console.log(`Password reset email sent to: ${email}`);
+    } catch (err: any) {
+      console.log('sendPasswordReset (user may not exist):', err.code || err.message);
+    }
+    res.status(200).json({ success: true });
+  }
+);
+
+// ── SCHEDULED TASK RESET + ISSUE CLEANUP ──────────────────
+export const dailyTaskReset = onSchedule(
+  { schedule: '5 0 * * *', timeZone: 'Australia/Brisbane' },
+  async (event) => {
+    const db = admin.firestore();
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const dayOfWeek = now.getDay();
+
+    try {
+      const dailySnap = await db.collection('tasks')
+        .where('frequency', '==', 'daily').where('done', '==', true).get();
+      if (!dailySnap.empty) {
+        const batch = db.batch();
+        dailySnap.docs.forEach(d => batch.update(d.ref, { done: false }));
+        await batch.commit();
+        console.log(`Daily reset: ${dailySnap.size} tasks reset`);
+      }
+
+      if (dayOfWeek === 1) {
+        const weeklySnap = await db.collection('tasks')
+          .where('frequency', '==', 'weekly').where('done', '==', true).get();
+        if (!weeklySnap.empty) {
+          const batch = db.batch();
+          weeklySnap.docs.forEach(d => batch.update(d.ref, { done: false }));
+          await batch.commit();
+          console.log(`Weekly reset: ${weeklySnap.size} tasks reset`);
+        }
+      }
+
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      const resolvedSnap = await db.collection('issues').where('status', '==', 'resolved').get();
+      const toDelete = resolvedSnap.docs.filter(d => {
+        const resolvedAt = d.data().resolvedAt?.toDate?.();
+        return resolvedAt && resolvedAt < sevenDaysAgo;
+      });
+      if (toDelete.length > 0) {
+        const batch = db.batch();
+        toDelete.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+        console.log(`Removed ${toDelete.length} old resolved issues`);
+      }
+
+      const resetUpdate: any = {
+        lastDailyReset: todayStr,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      if (dayOfWeek === 1) resetUpdate.lastWeeklyReset = todayStr;
+      await db.collection('appState').doc('taskResets').set(resetUpdate, { merge: true });
+
+      console.log(`Scheduled reset completed for ${todayStr}`);
+    } catch (err) {
+      console.error('dailyTaskReset error:', err);
+    }
+  }
+);
+
+// ── ONE-TIME MIGRATION: backfill assignedUids on existing venues ──
+export const migrateAssignedUids = onRequest(
+  { cors: true },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
+    const { adminKey } = req.body;
+    if (adminKey !== 'venuesv-admin-2026') { res.status(401).json({ error: 'Unauthorised' }); return; }
+
+    try {
+      const db = admin.firestore();
+      const [venuesSnap, usersSnap] = await Promise.all([
+        db.collection('venues').get(),
+        db.collection('users').get(),
+      ]);
+      const users = usersSnap.docs.map(d => ({ id: d.id, ...d.data() })) as any[];
+
+      let updated = 0;
+      const batch = db.batch();
+
+      venuesSnap.docs.forEach(venueDoc => {
+        const venueName = venueDoc.data().name;
+        const ownerId = venueDoc.data().ownerId;
+        const assignedUids = users
+          .filter(u =>
+            u.uid && u.uid !== ownerId &&
+            (u.venue === venueName || (Array.isArray(u.venues) && u.venues.includes(venueName)))
+          )
+          .map(u => u.uid);
+        batch.update(venueDoc.ref, { assignedUids });
+        updated++;
+      });
+
+      await batch.commit();
+      console.log(`migrateAssignedUids: updated ${updated} venues`);
+      res.status(200).json({ success: true, venuesUpdated: updated });
+    } catch (err: any) {
+      console.error('migrateAssignedUids error:', err);
+      res.status(500).json({ error: err.message || 'Migration failed' });
+    }
+  }
+);
+
+// ── INVITE TEAM MEMBER (called from app — Team/Overview screens) ──
+// Single definitive version — also maintains assignedUids on the venue
+// document for the Firestore rules' array-contains queries.
+export const inviteTeamMember = onRequest(
+  { cors: true, secrets: [SENDGRID_KEY] },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
     const { email, name, role, venue, callerUid } = req.body;
 
     if (!email || !name || !role) {
       res.status(400).json({ error: 'Email, name and role required' }); return;
     }
 
-    // Basic caller validation — confirm the inviting user exists and is
-    // an owner or manager. (Optional: tighten further if needed.)
     if (callerUid) {
       const callerSnap = await admin.firestore().collection('users').doc(callerUid).get();
       const callerRole = callerSnap.exists ? callerSnap.data()?.role : null;
@@ -421,16 +570,23 @@ export const inviteTeamMember = onRequest(
       }
     }
 
+    const addUidToVenueAssignedUids = async (venueName: string, uid: string) => {
+      if (!venueName) return;
+      const venueSnap = await admin.firestore()
+        .collection('venues').where('name', '==', venueName).limit(1).get();
+      if (venueSnap.empty) return;
+      const venueDoc = venueSnap.docs[0];
+      const current: string[] = venueDoc.data().assignedUids || [];
+      if (!current.includes(uid)) {
+        await venueDoc.ref.update({ assignedUids: [...current, uid] });
+      }
+    };
+
     try {
-      // Check if a Firestore user doc already exists for this email
       const existingSnap = await admin.firestore()
-        .collection('users')
-        .where('email', '==', email)
-        .limit(1)
-        .get();
+        .collection('users').where('email', '==', email).limit(1).get();
 
       if (!existingSnap.empty) {
-        // Existing user — just update their role/venue assignment
         const existingDoc = existingSnap.docs[0];
         const existingData = existingDoc.data();
         const existingUid = existingData.uid || existingDoc.id;
@@ -446,19 +602,16 @@ export const inviteTeamMember = onRequest(
           venue: existingData.venue || venue || '',
         }, { merge: true });
 
+        if (venue) await addUidToVenueAssignedUids(venue, existingUid);
+
         res.status(200).json({ success: true, uid: existingUid, existed: true });
         return;
       }
 
-      // New user — create Auth account server-side (does NOT affect caller's session)
       const tmp = 'Tmp' + Math.random().toString(36).slice(2, 8) + '!';
       let uid: string;
       try {
-        const userRecord = await admin.auth().createUser({
-          email,
-          password: tmp,
-          displayName: name,
-        });
+        const userRecord = await admin.auth().createUser({ email, password: tmp, displayName: name });
         uid = userRecord.uid;
       } catch (authErr: any) {
         if (authErr.code === 'auth/email-already-exists') {
@@ -476,8 +629,9 @@ export const inviteTeamMember = onRequest(
         tempPassword: tmp,
       }, { merge: true });
 
-      res.status(200).json({ success: true, uid, existed: false });
+      if (venue) await addUidToVenueAssignedUids(venue, uid);
 
+      res.status(200).json({ success: true, uid, existed: false });
     } catch (err: any) {
       console.error('inviteTeamMember error:', err);
       res.status(500).json({ error: err.message || 'Failed to invite team member' });
@@ -485,56 +639,154 @@ export const inviteTeamMember = onRequest(
   }
 );
 
-// ── PASSWORD RESET TEMPLATE ───────────────────────────────
-const passwordResetTemplate = (name: string, resetLink: string) =>
-  baseTemplate(`
-    <h2 class="title">Reset your password 🔑</h2>
-    <p class="text">Hi <strong>${name}</strong>, we received a request to reset your Venues V password.</p>
-    <p class="text">Click the button below to choose a new password:</p>
-    <a href="${resetLink}" class="btn">Reset Password →</a>
-    <div class="divider"></div>
-    <p class="text" style="font-size:13px;color:#999">
-      This link will expire shortly for security reasons. If you didn't request this, you can safely ignore this email — your password will not be changed.<br/>
-      Questions? Email <a href="mailto:hello@venuesv.com" style="color:#00c896">hello@venuesv.com</a>
-    </p>
-  `);
-
-// ── SEND PASSWORD RESET (called from app — LoginScreen) ───
-// Replaces client-side sendPasswordResetEmail (which sends from Firebase's
-// own domain/templates). Admin SDK generates the reset link, SendGrid sends
-// it with full Venues V branding, matching OTP/invite emails.
-export const sendPasswordReset = onRequest(
-  {
-    cors: true,
-    secrets: [SENDGRID_KEY],
-  },
+// ── REMOVE TEAM MEMBER FROM VENUE ─────────────────────────
+export const removeTeamMember = onRequest(
+  { cors: true },
   async (req, res) => {
     if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
-    const { email } = req.body;
-    if (!email) { res.status(400).json({ error: 'Email required' }); return; }
+    const { targetUid, venueName, callerUid } = req.body;
 
-    // Always respond success regardless of whether the account exists,
-    // to avoid leaking which emails are registered.
-    try {
-      const userRecord = await admin.auth().getUserByEmail(email);
-      const resetLink = await admin.auth().generatePasswordResetLink(email, {
-        url: 'https://venuesv.com',
-      });
-
-      const sgMail = require('@sendgrid/mail');
-      sgMail.setApiKey(SENDGRID_KEY.value());
-      await sgMail.send({
-        to: email,
-        from: { email: FROM_EMAIL, name: FROM_NAME },
-        subject: `Reset your Venues V password 🔑`,
-        html: passwordResetTemplate(userRecord.displayName || 'there', resetLink),
-      });
-      console.log(`Password reset email sent to: ${email}`);
-    } catch (err: any) {
-      // Don't leak whether the account exists — log internally, still return success
-      console.log('sendPasswordReset (user may not exist):', err.code || err.message);
+    if (!targetUid || !venueName) {
+      res.status(400).json({ error: 'targetUid and venueName required' }); return;
     }
 
-    res.status(200).json({ success: true });
+    if (callerUid) {
+      const callerSnap = await admin.firestore().collection('users').doc(callerUid).get();
+      const callerRole = callerSnap.exists ? callerSnap.data()?.role : null;
+      if (callerRole !== 'owner' && callerRole !== 'manager') {
+        res.status(403).json({ error: 'Not authorised to remove team members' }); return;
+      }
+    }
+
+    try {
+      const db = admin.firestore();
+      const userRef = db.collection('users').doc(targetUid);
+      const userSnap = await userRef.get();
+      if (!userSnap.exists) { res.status(404).json({ error: 'User not found' }); return; }
+
+      const userData = userSnap.data()!;
+      const currentVenues: string[] = userData.venues || (userData.venue ? [userData.venue] : []);
+      const updatedVenues = currentVenues.filter(v => v !== venueName);
+
+      await userRef.update({
+        venues: updatedVenues,
+        venue: updatedVenues.length > 0 ? updatedVenues[0] : '',
+      });
+
+      const venueSnap = await db.collection('venues').where('name', '==', venueName).limit(1).get();
+      if (!venueSnap.empty) {
+        const venueDoc = venueSnap.docs[0];
+        const currentUids: string[] = venueDoc.data().assignedUids || [];
+        await venueDoc.ref.update({
+          assignedUids: currentUids.filter(uid => uid !== targetUid),
+        });
+      }
+
+      res.status(200).json({ success: true });
+    } catch (err: any) {
+      console.error('removeTeamMember error:', err);
+      res.status(500).json({ error: err.message || 'Failed to remove team member' });
+    }
+  }
+);
+
+// ── GET VENUE TEAM MEMBERS ─────────────────────────────────
+export const getVenueTeamMembers = onRequest(
+  { cors: true },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
+    const { callerUid, venueId } = req.body;
+
+    if (!callerUid || !venueId) {
+      res.status(400).json({ error: 'callerUid and venueId required' }); return;
+    }
+
+    try {
+      const db = admin.firestore();
+      const [callerSnap, venueSnap] = await Promise.all([
+        db.collection('users').doc(callerUid).get(),
+        db.collection('venues').doc(venueId).get(),
+      ]);
+
+      if (!callerSnap.exists) { res.status(404).json({ error: 'Caller not found' }); return; }
+      if (!venueSnap.exists) { res.status(404).json({ error: 'Venue not found' }); return; }
+
+      const venue = venueSnap.data()!;
+      const assignedUids: string[] = venue.assignedUids || [];
+
+      const callerHasAccess = venue.ownerId === callerUid || assignedUids.includes(callerUid);
+      if (!callerHasAccess) {
+        res.status(403).json({ error: "Not authorised to view this venue's team" }); return;
+      }
+
+      if (assignedUids.length === 0) {
+        res.status(200).json({ success: true, members: [] });
+        return;
+      }
+
+      const chunks: string[][] = [];
+      for (let i = 0; i < assignedUids.length; i += 30) {
+        chunks.push(assignedUids.slice(i, i + 30));
+      }
+
+      const memberDocs = await Promise.all(
+        chunks.map(chunk =>
+          db.collection('users')
+            .where(admin.firestore.FieldPath.documentId(), 'in', chunk)
+            .get()
+        )
+      );
+
+      const members = memberDocs.flatMap(snap => snap.docs).map(d => ({ id: d.id, ...d.data() }));
+
+      res.status(200).json({ success: true, members });
+    } catch (err: any) {
+      console.error('getVenueTeamMembers error:', err);
+      res.status(500).json({ error: err.message || 'Failed to fetch team members' });
+    }
+  }
+);
+
+// ── ADMIN DATA READER (called from admin.venuesv.com) ─────
+// Admin SDK bypasses Firestore rules, so signupLeads (allow read: if false)
+// and the full users list stay locked to clients but readable here after
+// an admin-identity check via the caller's Firebase ID token.
+const ADMIN_EMAILS = ['sasukhman1@gmail.com', 'hello@venuesv.com'];
+
+export const getAdminData = onRequest(
+  { cors: true },
+  async (req, res) => {
+    const db = admin.firestore();
+    try {
+      const authHeader = req.get('Authorization') || '';
+      const idToken = authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7)
+        : null;
+      if (!idToken) {
+        res.status(401).json({ error: 'Missing auth token' });
+        return;
+      }
+
+      const decoded = await admin.auth().verifyIdToken(idToken);
+      if (!decoded.email || !ADMIN_EMAILS.includes(decoded.email)) {
+        res.status(403).json({ error: 'Not authorised' });
+        return;
+      }
+
+      const [leadsSnap, usersSnap] = await Promise.all([
+        db.collection('signupLeads').orderBy('createdAt', 'desc').get(),
+        db.collection('users').get(),
+      ]);
+
+      const leads = leadsSnap.docs.map(d => ({ ...d.data(), docId: d.id }));
+      const owners = usersSnap.docs
+        .map(d => ({ ...d.data(), docId: d.id }))
+        .filter((u: any) => u.role === 'owner');
+
+      res.json({ leads, owners });
+    } catch (e: any) {
+      console.error('getAdminData error:', e);
+      res.status(500).json({ error: e.message || 'Internal error' });
+    }
   }
 );

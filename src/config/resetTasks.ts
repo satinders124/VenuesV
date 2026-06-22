@@ -1,62 +1,20 @@
-import { collection, getDocs, updateDoc, doc, getDoc, setDoc, query, where, deleteDoc } from 'firebase/firestore';
-import { db } from './firebase';
-
+// NOTE: This client-side task/issue reset has been intentionally disabled.
+//
+// Reasons:
+// 1. It queried 'tasks' and 'issues' with no venueId scoping — it would
+//    reset EVERY customer's tasks globally, not just the current user's
+//    venues. This was a cross-tenant bug even before Firestore security
+//    rules were tightened.
+// 2. It writes to 'appState/taskResets', which the security rules now
+//    correctly block from client writes (Admin SDK / Cloud Functions only).
+// 3. Running this per-user, per-app-open is unreliable and wasteful even
+//    if it were scoped correctly — daily/weekly resets and 7-day cleanup
+//    now run server-side via the dailyTaskReset scheduled Cloud Function.
+//
+// This is now a no-op, kept only so the existing import in App.tsx doesn't
+// break. Safe to delete the import + this file entirely in a future cleanup.
 export async function resetTasksIfNeeded() {
-  try {
-    const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
-    const dayOfWeek = now.getDay();
-
-    const resetSnap = await getDoc(doc(db, 'appState', 'taskResets'));
-    const resets = resetSnap.exists() ? resetSnap.data() : {};
-
-    const lastDailyReset  = resets.lastDailyReset  || '';
-    const lastWeeklyReset = resets.lastWeeklyReset || '';
-
-    let didDailyReset  = false;
-    let didWeeklyReset = false;
-
-    // Daily reset
-    if (lastDailyReset !== todayStr) {
-      const q = query(collection(db,'tasks'), where('frequency','==','daily'), where('done','==',true));
-      const snap = await getDocs(q);
-      await Promise.all(snap.docs.map(d => updateDoc(doc(db,'tasks',d.id),{done:false})));
-      didDailyReset = true;
-    }
-
-    // Weekly reset — Mondays only
-    if (dayOfWeek === 1 && lastWeeklyReset !== todayStr) {
-      const q = query(collection(db,'tasks'), where('frequency','==','weekly'), where('done','==',true));
-      const snap = await getDocs(q);
-      await Promise.all(snap.docs.map(d => updateDoc(doc(db,'tasks',d.id),{done:false})));
-      didWeeklyReset = true;
-    }
-
-    // Delete resolved issues older than 7 days
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7);
-    const resolvedSnap = await getDocs(
-      query(collection(db,'issues'), where('status','==','resolved'))
-    );
-    const toDelete = resolvedSnap.docs.filter(d => {
-      const resolvedAt = d.data().resolvedAt?.toDate?.();
-      return resolvedAt && resolvedAt < sevenDaysAgo;
-    });
-    if (toDelete.length > 0) {
-      await Promise.all(toDelete.map(d => deleteDoc(doc(db,'issues',d.id))));
-      console.log(`Removed ${toDelete.length} old resolved issues`);
-    }
-
-    // Save reset timestamps
-    if (didDailyReset || didWeeklyReset) {
-      await setDoc(doc(db,'appState','taskResets'), {
-        lastDailyReset:  didDailyReset  ? todayStr : lastDailyReset,
-        lastWeeklyReset: didWeeklyReset ? todayStr : lastWeeklyReset,
-        updatedAt: now.toISOString(),
-      });
-    }
-
-  } catch (err) {
-    console.log('Task reset skipped:', err);
-  }
+  // Intentionally disabled — see comment above. dailyTaskReset Cloud
+  // Function (scheduled, 00:05 Australia/Brisbane) handles this now.
+  return;
 }

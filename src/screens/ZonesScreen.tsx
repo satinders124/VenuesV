@@ -9,6 +9,7 @@ import {
   doc, query, where, addDoc, serverTimestamp
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { safeOnSnapshot } from '../config/firestoreHelpers';
 import { useAuth } from '../context/AuthContext';
 
 type ZoneStatus = 'clean' | 'attention' | 'working' | 'issue';
@@ -22,7 +23,7 @@ type Zone = {
   venueId: string;
 };
 
-type Venue = { id: string; name: string; };
+type Venue = { id: string; name: string; ownerId?: string; };
 
 const STATUS_CONFIG: Record<ZoneStatus, { label: string; color: string }> = {
   clean:     { label:'✅ Clean',       color:'#00c896' },
@@ -58,24 +59,44 @@ export default function ZonesScreen() {
   const [newZoneIcon, setNewZoneIcon] = useState('📍');
   const [newVenueId,  setNewVenueId]  = useState('');
 
+  // ── Scoped venues + zones query ───────────────────────
+  // Owners filter by ownerId; everyone else by their assigned venue
+  // name(s). Zones are then re-subscribed using
+  // where('venueId','in', accessibleVenueIds) — fixes the previous
+  // hardcoded 'eagle-heights' fallback, which only worked for one
+  // specific test venue and broke for every other customer.
   useEffect(() => {
-    const unsubVenues = onSnapshot(collection(db, 'venues'), snap => {
-      const v = snap.docs.map(d => ({ id:d.id, ...d.data() })) as Venue[];
+    if (!user) return;
+
+    const venuesQuery = user.role === 'owner'
+      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
+      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
+
+    let unsubZones: (() => void) | null = null;
+
+    const unsubVenues = safeOnSnapshot(venuesQuery, snap => {
+      const v = snap.docs.map((d: any) => ({ id:d.id, ...d.data() })) as Venue[];
       setVenues(v);
-      if (v.length > 0) setNewVenueId(v[0].id);
+      if (v.length > 0 && !newVenueId) setNewVenueId(v[0].id);
+
+      if (unsubZones) unsubZones();
+      const venueIds = v.map(x => x.id).slice(0, 30);
+      if (venueIds.length > 0) {
+        unsubZones = safeOnSnapshot(
+          query(collection(db,'zones'), where('venueId','in',venueIds)),
+          snap2 => {
+            setZones(snap2.docs.map((d: any) => ({ id:d.id, ...d.data() })) as Zone[]);
+            setLoading(false);
+          }
+        );
+      } else {
+        setZones([]);
+        setLoading(false);
+      }
     });
 
-    const zonesQuery = isOwnerOrManager
-      ? collection(db, 'zones')
-      : query(collection(db, 'zones'), where('venueId', '==', 'eagle-heights'));
-
-    const unsubZones = onSnapshot(zonesQuery, snap => {
-      setZones(snap.docs.map(d => ({ id:d.id, ...d.data() })) as Zone[]);
-      setLoading(false);
-    });
-
-    return () => { unsubVenues(); unsubZones(); };
-  }, []);
+    return () => { unsubVenues(); if (unsubZones) unsubZones(); };
+  }, [user]);
 
   const updateStatus = async (id: string, status: ZoneStatus) => {
     await updateDoc(doc(db, 'zones', id), { status });
