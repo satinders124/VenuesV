@@ -36,6 +36,24 @@ const FREQ_CONFIG: Record<Frequency, { label:string; color:string }> = {
   once:   { label:'One-off', color:'#f5a623' },
 };
 
+const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
+
+async function getVenueTokens(callerUid: string, venueId: string): Promise<string[]> {
+  try {
+    const resp = await fetch(TEAM_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callerUid, venueId }),
+    });
+    const data = await resp.json();
+    return (data.members || [])
+      .map((m: any) => m.expoPushToken)
+      .filter((t: any) => typeof t === 'string' && t.startsWith('ExponentPushToken'));
+  } catch {
+    return [];
+  }
+}
+
 const ZONES = ['All Areas','Front Bar','Beer Garden','Restrooms','Gaming Room','Carpark','Kitchen Entry','External'];
 const ICONS  = ['🧹','🪣','🚻','🗑️','🧴','🎰','🚗','🍺','🌿','🍽️','🪟','🚿','🛒','📦','🧽'];
 
@@ -131,7 +149,8 @@ export default function TasksScreen() {
       setAddModal(false);
     } catch(err:any){Alert.alert('Error',err.message);}
     setSaving(false);
-    await notifyTaskCreated(fTitle, currentVenue?.name||'', user?.name||'');
+    const taskTokens = await getVenueTokens(user?.uid||'', activeVenue);
+    await notifyTaskCreated(taskTokens, fTitle, currentVenue?.name||'', user?.name||'');
   };
 
   const venueTasks = tasks.filter(t=>t.venueId===activeVenue);

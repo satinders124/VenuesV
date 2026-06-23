@@ -39,9 +39,6 @@ const TAB_OPTIONS = {
   tabBarLabelStyle: { fontSize: 11, fontWeight: '700' as const },
 };
 
-// Scoped venues query — owners by ownerId, everyone else by assignedUids
-// array-contains, which Firestore CAN structurally verify against the
-// security rules (unlike the previous name-matching approach).
 function getMyVenuesQuery(user: any) {
   if (!user) return null;
   if (user.role === 'owner') {
@@ -56,14 +53,11 @@ function useIssuesBadge() {
 
   useEffect(() => {
     if (!user) return;
-
     const venuesQuery = getMyVenuesQuery(user);
     if (!venuesQuery) { setIssueCount(0); return; }
-
     const unsubVenues = safeOnSnapshot(venuesQuery, venueSnap => {
       const venueIds = venueSnap.docs.map((d: any) => d.id);
       if (venueIds.length === 0) { setIssueCount(0); return; }
-
       const idsForQuery = venueIds.slice(0, 30);
       const unsubIssues = safeOnSnapshot(
         query(
@@ -73,16 +67,15 @@ function useIssuesBadge() {
         ),
         issueSnap => setIssueCount(issueSnap.size)
       );
-
       return unsubIssues;
     });
-
     return () => unsubVenues();
   }, [user]);
 
   return issueCount;
 }
 
+// Owner: Overview, Dashboard, Issues, Chat (managers only), More
 function OwnerTabs() {
   const { unreadCount } = useUnread();
   const issueCount = useIssuesBadge();
@@ -97,12 +90,18 @@ function OwnerTabs() {
           tabBarIcon: ({ color }) => <Ionicons name="warning-outline" color={color} size={22} />,
           tabBarBadge: issueCount > 0 ? issueCount : undefined,
         }} />
+      <Tab.Screen name="Chat"      component={ChatScreen}
+        options={{
+          tabBarIcon: ({ color }) => <Ionicons name="chatbubbles-outline" color={color} size={22} />,
+          tabBarBadge: unreadCount > 0 ? unreadCount : undefined,
+        }} />
       <Tab.Screen name="More"      component={MoreScreen}
         options={{ tabBarIcon: ({ color }) => <Ionicons name="menu-outline" color={color} size={22} /> }} />
     </Tab.Navigator>
   );
 }
 
+// Manager: Overview, Tasks, Issues, Chat (owner+staff+cleaners), More
 function ManagerTabs() {
   const { unreadCount } = useUnread();
   const issueCount = useIssuesBadge();
@@ -128,6 +127,7 @@ function ManagerTabs() {
   );
 }
 
+// Cleaner: Overview, Tasks, Issues, Chat (manager+staff), More
 function CleanerTabs() {
   const { unreadCount } = useUnread();
   const issueCount = useIssuesBadge();
@@ -153,6 +153,7 @@ function CleanerTabs() {
   );
 }
 
+// Staff: Overview, Tasks, Issues, Chat (manager+cleaners), More
 function StaffTabs() {
   const { unreadCount } = useUnread();
   const issueCount = useIssuesBadge();
@@ -178,9 +179,11 @@ function StaffTabs() {
   );
 }
 
+// Gate Team, AddVenue, Reports to owner+manager only
 function AppStack() {
   const { user } = useAuth();
   const role = user?.role;
+  const isOwnerOrManager = role === 'owner' || role === 'manager';
 
   const Tabs = role === 'owner'   ? OwnerTabs
              : role === 'manager' ? ManagerTabs
@@ -189,10 +192,14 @@ function AppStack() {
 
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="Tabs"     component={Tabs}          />
-      <Stack.Screen name="Team"     component={TeamScreen}    />
-      <Stack.Screen name="AddVenue" component={AddVenueScreen}/>
-      <Stack.Screen name="Reports"  component={ReportsScreen} />
+      <Stack.Screen name="Tabs" component={Tabs} />
+      {isOwnerOrManager && (
+        <>
+          <Stack.Screen name="Team"     component={TeamScreen}    />
+          <Stack.Screen name="AddVenue" component={AddVenueScreen}/>
+          <Stack.Screen name="Reports"  component={ReportsScreen} />
+        </>
+      )}
     </Stack.Navigator>
   );
 }

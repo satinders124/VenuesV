@@ -34,37 +34,39 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
   const getRoomIds = (venues: any[], members: any[]): string[] => {
     if (!user) return [];
 
-    const getDmId = (memberName: string) => {
-      const names = [user.name, memberName].sort();
-      return `dm_${names[0].replace(/\s/g,'_')}_${names[1].replace(/\s/g,'_')}`;
+    const getDmId = (memberUid: string) => {
+      const ids = [user.uid, memberUid].sort();
+      return `dm_${ids[0]}_${ids[1]}`;
     };
 
-    const isOwner   = user.role === 'owner';
-    const isManager = user.role === 'manager';
-    const isWorker  = user.role === 'cleaner' || user.role === 'staff';
+    // DM matrix — who each role can message:
+    // owner   → managers only
+    // manager → owners, staff, cleaners
+    // cleaner → managers, staff
+    // staff   → managers, cleaners
+    const dmAllowed: Record<string, string[]> = {
+      owner:   ['manager'],
+      manager: ['owner', 'staff', 'cleaner'],
+      cleaner: ['manager', 'staff'],
+      staff:   ['manager', 'cleaner'],
+    };
+    const allowedRoles = dmAllowed[user.role] || [];
 
     let roomIds: string[] = [...venues.map((v: any) => v.id)];
 
-    if (isManager || isOwner) {
-      const venueMates = members.filter((m: any) =>
-        m.name !== user.name && m.role !== 'owner'
-      );
-      venueMates.forEach((m: any) => roomIds.push(getDmId(m.name)));
-    } else if (isWorker) {
-      const managers = members.filter((m: any) =>
-        m.role === 'manager' && m.venue === user.venue
-      );
-      managers.forEach((m: any) => roomIds.push(getDmId(m.name)));
-    }
+    const dmPartners = members.filter((m: any) =>
+      m.name !== user.name && allowedRoles.includes(m.role)
+    );
+    dmPartners.forEach((m: any) => roomIds.push(getDmId(m.uid || m.id)));
 
     return [...new Set(roomIds)];
   };
 
   const markRoomRead = async (roomId: string) => {
-    if (!user?.name) return;
-    const key = `${user.name}_${roomId}`.replace(/\s/g, '_');
+    if (!user?.uid) return;
+    const key = `${user.uid}_${roomId}`;
     await setDoc(doc(db, 'readReceipts', key), {
-      userId: user.name,
+      userId: user.uid,
       roomId,
       readAt: serverTimestamp(),
     });
@@ -98,7 +100,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
-    if (!user?.name) return;
+    if (!user?.uid) return;
 
     let venues:  any[] = [];
     let members: any[] = [];
@@ -112,7 +114,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
       if (roomIds.length === 0) return;
 
       roomIds.forEach(async roomId => {
-        const key = `${user.name}_${roomId}`.replace(/\s/g, '_');
+        const key = `${user.uid}_${roomId}`;
         try {
           const snap = await getDoc(doc(db, 'readReceipts', key));
           if (snap.exists()) {
@@ -174,7 +176,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
       u1();
       roomUnsubs.forEach(u => u());
     };
-  }, [user?.name]);
+  }, [user?.uid]);
 
   useEffect(() => {
     const total = Object.values(roomUnreads).reduce((sum, r) => sum + (r.count || 0), 0);

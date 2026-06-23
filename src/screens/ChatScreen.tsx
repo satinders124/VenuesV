@@ -15,16 +15,35 @@ import { useUnread } from '../context/UnreadContext';
 import { Ionicons } from '@expo/vector-icons';
 
 const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
+import { notifyChatMessage } from '../config/notifications';
 
 type Message  = { id:string; text:string; senderName:string; senderRole:string; createdAt:any; };
 type Venue    = { id:string; name:string; suburb:string; ownerId?:string; assignedUids?:string[]; };
-type Member   = { id:string; name:string; role:string; email:string; venue:string; venues?:string[]; };
+type Member   = { id:string; name:string; role:string; email:string; venue:string; venues?:string[]; expoPushToken?:string; };
 type ChatRoom = { id:string; name:string; subtitle:string; type:'venue'|'dm'; avatar:string; avatarColor:string; };
 type FilterType = 'venues'|'staff'|'cleaners'|'manager';
 
 const ROLE_COLOR: Record<string,string> = {
   owner:'#f5a623', manager:'#2c7ef7', cleaner:'#00c896', staff:'#a855f7',
 };
+
+// Fetch push tokens for specific user uids via Cloud Function
+async function getTokensForUids(callerUid: string, venueId: string, uids: string[]): Promise<string[]> {
+  try {
+    const resp = await fetch(TEAM_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callerUid, venueId }),
+    });
+    const data = await resp.json();
+    return (data.members || [])
+      .filter((m: any) => uids.includes(m.id))
+      .map((m: any) => m.expoPushToken)
+      .filter((t: any) => typeof t === 'string' && t.startsWith('ExponentPushToken'));
+  } catch {
+    return [];
+  }
+}
 
 export default function ChatScreen() {
   const { user } = useAuth();
@@ -108,14 +127,35 @@ export default function ChatScreen() {
     if (!text.trim()||!activeRoom) return;
     setSending(true);
     try {
+      const msgText = text.trim();
       await addDoc(collection(db,'chats',activeRoom.id,'messages'), {
-        text: text.trim(),
+        text: msgText,
         senderName: user?.name,
         senderRole: user?.role,
         createdAt: serverTimestamp(),
       });
       setText('');
       markRoomRead(activeRoom.id);
+
+      // Notify recipients — for DM rooms notify the other person,
+      // for venue group rooms notify all venue members except sender.
+      if (activeRoom.type === 'dm') {
+        // Get the other person's uid from members list
+        const otherName = activeRoom.name;
+        const other = members.find((m: Member) => m.name === otherName);
+        if (other?.id && venues[0]?.id) {
+          const tokens = await getTokensForUids(user?.uid||'', venues[0].id, [other.id]);
+          await notifyChatMessage(tokens, user?.name||'', msgText, activeRoom.name);
+        }
+      } else {
+        // Venue group chat — notify all members except sender
+        if (venues[0]?.id) {
+          const allTokens = await getTokensForUids(user?.uid||'', activeRoom.id, members.map((m:Member)=>m.id));
+          const myToken = members.find((m:Member)=>m.name===user?.name)?.expoPushToken;
+          const tokens = allTokens.filter((t:string)=>t!==myToken);
+          await notifyChatMessage(tokens, user?.name||'', msgText, activeRoom.name);
+        }
+      }
     } catch(err){ console.error(err); }
     setSending(false);
   };

@@ -42,6 +42,10 @@
           "sounds": []
         }
       ],
+
+      ["expo-media-library", {
+    "photosPermission": "Allow Venues V to save photos to your library."
+  }],
       "expo-font"
     ],
     "extra": {

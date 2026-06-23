@@ -7,10 +7,11 @@ import { UnreadProvider } from './src/context/UnreadContext';
 import { resetTasksIfNeeded } from './src/config/resetTasks';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { registerForPushNotifications } from './src/config/notifications';
-import { updateDoc, doc, collection, query, where, getDocs } from 'firebase/firestore';
+import { updateDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from './src/config/firebase';
 import * as Notifications from 'expo-notifications';
 import SplashScreen from './src/components/SplashScreen';
+import { setDoc, doc } from 'firebase/firestore';
 
 // Handle incoming notifications while app is open
 Notifications.setNotificationHandler({

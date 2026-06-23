@@ -18,8 +18,29 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { notifyIssueRaised, notifyIssueResolved } from '../config/notifications';
 import { RefreshControl } from 'react-native';
+import * as MediaLibrary from 'expo-media-library';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
+
+// Fetch push tokens for all members of a venue via Cloud Function (Admin SDK,
+// bypasses Firestore rules). Returns empty array on any failure.
+async function getVenueTokens(callerUid: string, venueId: string): Promise<string[]> {
+  try {
+    const resp = await fetch(TEAM_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callerUid, venueId }),
+    });
+    const data = await resp.json();
+    return (data.members || [])
+      .map((m: any) => m.expoPushToken)
+      .filter((t: any) => typeof t === 'string' && t.startsWith('ExponentPushToken'));
+  } catch {
+    return [];
+  }
+}
 
 
 type Priority = 'high' | 'medium' | 'low';
@@ -74,7 +95,9 @@ export default function IssuesScreen() {
   const [resolvePhotos,   setResolvePhotos]   = useState<string[]>([]);
   const [resolveNote,     setResolveNote]     = useState('');
   const [resolvingSaving, setResolvingSaving] = useState(false);
-  const [viewerPhoto,     setViewerPhoto]     = useState<string|null>(null);
+  const [viewerPhotos,    setViewerPhotos]    = useState<string[]>([]);
+  const [viewerIndex,     setViewerIndex]     = useState(0);
+  const [downloading,     setDownloading]     = useState(false);
 
   // ── Scoped venues + issues query ──────────────────────
   // Owners filter by ownerId; everyone else by their assigned venue
@@ -187,7 +210,8 @@ const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||v
       setNewTitle(''); setNewZone(ZONES[0]); setNewPriority('medium'); setReportPhotos([]);
     } catch(err:any){ Alert.alert('Error',err.message); }
     setSaving(false);
-    await notifyIssueRaised(newTitle, newPriority, newZone, venues.find(v=>v.id===newVenueId)?.name||'', user?.name||'');
+    const raiseTokens = await getVenueTokens(user?.uid||'', newVenueId);
+    await notifyIssueRaised(raiseTokens, newTitle, newPriority, newZone, venues.find(v=>v.id===newVenueId)?.name||'', user?.name||'');
   };
 
   const confirmResolve = async () => {
@@ -212,7 +236,10 @@ const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||v
     } catch(err:any){ Alert.alert('Error',err.message); }
     setResolvingSaving(false);
     const issue = issues.find(i=>i.id===resolveIssueId);
-if (issue) await notifyIssueResolved(issue.title, venues.find(v=>v.id===issue.venueId)?.name||'', user?.name||'');
+if (issue) {
+  const resolveTokens = await getVenueTokens(user?.uid||'', issue.venueId);
+  await notifyIssueResolved(resolveTokens, issue.title, venues.find(v=>v.id===issue.venueId)?.name||'', user?.name||'');
+}
   };
 
   const filteredByVenue = selectedVenue==='all' ? issues : issues.filter(i=>i.venueId===selectedVenue);
@@ -236,10 +263,13 @@ if (issue) await notifyIssueResolved(issue.title, venues.find(v=>v.id===issue.ve
 
   const PhotoStrip = ({urls, label, labelColor='#6e7a8a'}: {urls:string[];label:string;labelColor?:string}) => (
     <View style={s.photoSection}>
-      <Text style={[s.photoLabel,{color:labelColor}]}>{label}</Text>
+      <TouchableOpacity style={s.photoLabelRow} onPress={()=>{setViewerPhotos(urls);setViewerIndex(0);}}>
+        <Text style={[s.photoLabel,{color:labelColor}]}>{label}</Text>
+        <Ionicons name="chevron-forward" color={labelColor} size={12}/>
+      </TouchableOpacity>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.photoStrip}>
         {urls.map((url,i)=>(
-          <TouchableOpacity key={i} onPress={()=>setViewerPhoto(url)} style={s.photoThumbWrap}>
+          <TouchableOpacity key={i} onPress={()=>{setViewerPhotos(urls);setViewerIndex(i);}} style={s.photoThumbWrap}>
             <Image source={{uri:url}} style={s.photoThumb} resizeMode="cover"/>
             <View style={s.photoThumbOverlay}>
               <Ionicons name="expand-outline" color="#fff" size={14}/>
@@ -299,7 +329,7 @@ if (issue) await notifyIssueResolved(issue.title, venues.find(v=>v.id===issue.ve
       )}
     </View>
 
-    {isOwnerOrManager && venues.length > 1 && (
+    {venues.length > 1 && (
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.venueTabsWrap} contentContainerStyle={s.venueTabs}>
         <TouchableOpacity style={[s.venueTab,selectedVenue==='all'&&s.venueTabActive]} onPress={()=>setSelectedVenue('all')}>
           <Text style={[s.venueTabText,selectedVenue==='all'&&s.venueTabTextActive]}>All</Text>
@@ -334,7 +364,7 @@ if (issue) await notifyIssueResolved(issue.title, venues.find(v=>v.id===issue.ve
       <View style={s.header}>
         <View>
           <Text style={s.heading}>Issues</Text>
-          <Text style={s.sub}>{isOwnerOrManager?'All venues':user?.venue}</Text>
+          <Text style={s.sub}>{venues.length > 1 ? (selectedVenue==='all' ? 'All venues' : venues.find(v=>v.id===selectedVenue)?.name||'') : venues[0]?.name||user?.venue||''}</Text>
         </View>
         {canRaise && (
           <TouchableOpacity style={s.raiseBtn} onPress={()=>setModal(true)}>
@@ -384,7 +414,10 @@ if (issue) await notifyIssueResolved(issue.title, venues.find(v=>v.id===issue.ve
             </View>
 
             <Text style={s.issueTitle}>{issue.title}</Text>
-            <Text style={s.issueMeta}>📍 {issue.zone} · {issue.by}</Text>
+            <View style={{flexDirection:'row',alignItems:'center',gap:4}}>
+              <Ionicons name="location-outline" color="#6e7a8a" size={12}/>
+              <Text style={s.issueMeta}>{issue.zone} · {issue.by}</Text>
+            </View>
 
             {issue.photoUrls && issue.photoUrls.length > 0 && (
               <PhotoStrip urls={issue.photoUrls} label={`📷 ${issue.photoUrls.length} photo${issue.photoUrls.length>1?'s':''}`}/>
@@ -398,8 +431,8 @@ if (issue) await notifyIssueResolved(issue.title, venues.find(v=>v.id===issue.ve
                 </View>
                 {!!issue.resolvedNote && (
                   <View style={s.resolveNoteWrap}>
-                    <Ionicons name="chatbubble-outline" color="#00c896" size={12}/>
-                    <Text style={s.resolveNote}>"{issue.resolvedNote}"</Text>
+                    <Ionicons name="chatbubble-ellipses-outline" color="#00c896" size={12}/>
+                    <Text style={s.resolveNote}>{issue.resolvedNote}</Text>
                   </View>
                 )}
                 {issue.resolvedPhotoUrls && issue.resolvedPhotoUrls.length > 0 && (
@@ -422,15 +455,68 @@ if (issue) await notifyIssueResolved(issue.title, venues.find(v=>v.id===issue.ve
         )}
       />
 
-      {/* Full Screen Photo Viewer */}
-      <Modal visible={!!viewerPhoto} transparent animationType="fade">
+      {/* Full Screen Photo Viewer — swipeable + download */}
+      <Modal visible={viewerPhotos.length > 0} transparent animationType="fade">
         <View style={s.viewerOverlay}>
-          <TouchableOpacity style={s.viewerClose} onPress={()=>setViewerPhoto(null)}>
-            <Ionicons name="close" color="#fff" size={28}/>
+          {/* Close */}
+          <TouchableOpacity style={s.viewerClose} onPress={()=>setViewerPhotos([])}>
+            <Ionicons name="close" color="#fff" size={26}/>
           </TouchableOpacity>
-          {viewerPhoto && (
-            <Image source={{uri:viewerPhoto}} style={s.viewerImage} resizeMode="contain"/>
+          {/* Counter */}
+          {viewerPhotos.length > 1 && (
+            <View style={s.viewerCounter}>
+              <Text style={s.viewerCounterText}>{viewerIndex+1} / {viewerPhotos.length}</Text>
+            </View>
           )}
+          {/* Swipeable images */}
+          <FlatList
+            data={viewerPhotos}
+            keyExtractor={(_,i)=>String(i)}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            initialScrollIndex={viewerIndex}
+            getItemLayout={(_,i)=>({length:SCREEN_WIDTH,offset:SCREEN_WIDTH*i,index:i})}
+            onMomentumScrollEnd={e=>{
+              const idx = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
+              setViewerIndex(idx);
+            }}
+            renderItem={({item:url})=>(
+              <View style={{width:SCREEN_WIDTH,justifyContent:'center',alignItems:'center'}}>
+                <Image source={{uri:url}} style={s.viewerImage} resizeMode="contain"/>
+              </View>
+            )}
+          />
+          {/* Download */}
+          <TouchableOpacity
+            style={s.viewerDownload}
+            disabled={downloading}
+            onPress={async ()=>{
+              const url = viewerPhotos[viewerIndex];
+              if (!url) return;
+              setDownloading(true);
+              try {
+                const { status } = await MediaLibrary.requestPermissionsAsync();
+                if (status !== 'granted') {
+                  Alert.alert('Permission required','Please allow photo library access to save images.');
+                  setDownloading(false);
+                  return;
+                }
+                const asset = await MediaLibrary.createAssetAsync(url);
+                await MediaLibrary.createAlbumAsync('Venues V', asset, false);
+                Alert.alert('Saved!','Photo saved to your camera roll.');
+              } catch(err:any) {
+                Alert.alert('Download failed', err.message || 'Could not save photo.');
+              }
+              setDownloading(false);
+            }}
+          >
+            {downloading
+              ? <ActivityIndicator color="#fff" size="small"/>
+              : <><Ionicons name="download-outline" color="#fff" size={22}/>
+                 <Text style={s.viewerDownloadText}>Save Photo</Text></>
+            }
+          </TouchableOpacity>
         </View>
       </Modal>
 
@@ -447,7 +533,7 @@ if (issue) await notifyIssueResolved(issue.title, venues.find(v=>v.id===issue.ve
                   </TouchableOpacity>
                 </View>
 
-                {isOwnerOrManager && venues.length > 1 && (
+                {venues.length > 1 && (
                   <>
                     <Text style={s.inputLabel}>VENUE</Text>
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{marginBottom:14}}>
@@ -582,7 +668,7 @@ searchBar: {flexDirection:'row',alignItems:'center',gap:10,backgroundColor:'#0f1
   list:                {paddingHorizontal:24,paddingBottom:20,gap:12},
   emptyWrap:           {alignItems:'center',paddingTop:60,gap:12},
   emptyText:           {fontSize:15,color:'#6e7a8a',fontWeight:'600'},
-  issueCard:           {backgroundColor:'#0f1218',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderLeftWidth:3,borderRadius:14,padding:16,gap:10},
+  issueCard:           {backgroundColor:'#0f1218',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderLeftWidth:4,borderRadius:14,padding:16,gap:10},
   issueResolved:       {opacity:0.75},
   issueTop:            {flexDirection:'row',alignItems:'center',gap:8,flexWrap:'wrap'},
   priorityBadge:       {paddingHorizontal:8,paddingVertical:3,borderRadius:99},
@@ -592,9 +678,10 @@ searchBar: {flexDirection:'row',alignItems:'center',gap:10,backgroundColor:'#0f1
   issueVenueTag:       {fontSize:11,color:'#3a4252'},
   issueDate:           {fontSize:11,color:'#3a4252',marginLeft:'auto'},
   issueTitle:          {fontSize:14,fontWeight:'700',color:'#eef0f4',lineHeight:20},
-  issueMeta:           {fontSize:12,color:'#6e7a8a'},
+  issueMeta:           {fontSize:12,color:'#6e7a8a',flexDirection:'row',alignItems:'center'},
   photoSection:        {gap:6},
   photoLabel:          {fontSize:11,fontWeight:'600'},
+  photoLabelRow:       {flexDirection:'row',alignItems:'center',gap:4},
   photoStrip:          {marginTop:4},
   photoThumbWrap:      {marginRight:8,borderRadius:8,overflow:'hidden',position:'relative'},
   photoThumb:          {width:100,height:80,borderRadius:8},
@@ -606,9 +693,13 @@ searchBar: {flexDirection:'row',alignItems:'center',gap:10,backgroundColor:'#0f1
   resolveNote:         {fontSize:12,color:'#eef0f4',flex:1,fontStyle:'italic',lineHeight:18},
   resolveBtn:          {flexDirection:'row',alignItems:'center',justifyContent:'center',gap:6,backgroundColor:'rgba(0,200,150,.1)',borderWidth:1,borderColor:'rgba(0,200,150,.3)',borderRadius:9,padding:12,marginTop:4},
   resolveBtnText:      {color:'#00c896',fontWeight:'700',fontSize:13},
-  viewerOverlay:       {flex:1,backgroundColor:'rgba(0,0,0,.95)',justifyContent:'center',alignItems:'center'},
+  viewerOverlay:       {flex:1,backgroundColor:'rgba(0,0,0,.97)',justifyContent:'center',alignItems:'center'},
   viewerClose:         {position:'absolute',top:50,right:20,zIndex:10,backgroundColor:'rgba(255,255,255,.1)',borderRadius:20,padding:8},
-  viewerImage:         {width:SCREEN_WIDTH,height:SCREEN_WIDTH*1.2},
+  viewerImage:         {width:SCREEN_WIDTH,height:SCREEN_WIDTH*1.3},
+  viewerCounter:       {position:'absolute',top:54,alignSelf:'center',zIndex:10,backgroundColor:'rgba(0,0,0,.5)',paddingHorizontal:12,paddingVertical:4,borderRadius:99},
+  viewerCounterText:   {color:'#fff',fontSize:13,fontWeight:'600'},
+  viewerDownload:      {position:'absolute',bottom:48,alignSelf:'center',flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'rgba(255,255,255,.15)',paddingHorizontal:20,paddingVertical:12,borderRadius:99,borderWidth:1,borderColor:'rgba(255,255,255,.2)'},
+  viewerDownloadText:  {color:'#fff',fontSize:14,fontWeight:'600'},
   modalOverlay:        {flex:1,justifyContent:'flex-end'},
   modalBox:            {backgroundColor:'#0f1218',borderTopLeftRadius:20,borderTopRightRadius:20,padding:24,maxHeight:'90%'},
   modalHeader:         {flexDirection:'row',justifyContent:'space-between',alignItems:'center',marginBottom:12},
