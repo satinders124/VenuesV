@@ -4,11 +4,9 @@ import { AuthProvider, useAuth } from './src/context/AuthContext';
 import AppNavigator, { navigationRef } from './src/navigation/AppNavigator';
 import { StatusBar } from 'expo-status-bar';
 import { UnreadProvider } from './src/context/UnreadContext';
-import { resetTasksIfNeeded } from './src/config/resetTasks';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { registerForPushNotifications } from './src/config/notifications';
-import { setDoc, doc, getDoc } from 'firebase/firestore';
-import { db } from './src/config/firebase';
+import { supabase } from './src/config/supabase';
 import * as Notifications from 'expo-notifications';
 import SplashScreen from './src/components/SplashScreen';
 import { Linking } from 'react-native';
@@ -44,34 +42,26 @@ function Root() {
   useEffect(() => {
     if (!user) return;
 
-    // Save push token directly to users/{uid}
     registerForPushNotifications().then(async token => {
       if (!token) return;
       try {
-        await setDoc(doc(db, 'users', user.uid), { expoPushToken: token }, { merge: true });
+        await supabase.from('users').update({ expoPushToken: token }).eq('uid', user.uid);
       } catch(err) {
         console.log('Token save error:', err);
       }
     });
 
-    resetTasksIfNeeded();
-
-    // Notification tap handler
     const tapSub = Notifications.addNotificationResponseReceivedListener(response => {
       const screen = response.notification.request.content.data?.screen as string | undefined;
       navigateFromNotification(screen);
     });
 
-    // Deep link handler — fired when app opens via venuesv:// URL
     const linkSub = Linking.addEventListener('url', ({ url }) => {
       if (url.includes('subscription-success')) {
-        // Refresh user doc so subscription banner disappears immediately
         refreshUser();
       }
     });
 
-    // AppState handler — refresh user when app comes back to foreground
-    // This catches the case where user paid in browser then switched back
     const appStateSub = AppState.addEventListener('change', state => {
       if (state === 'active') {
         refreshUser();

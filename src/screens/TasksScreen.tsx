@@ -168,7 +168,7 @@ export default function TasksScreen() {
       
       if (!editTask) {
         const taskTokens = await getVenueTokens(user?.uid||'', activeVenue);
-        await notifyTaskCreated(taskTokens, fTitle, currentVenue?.name||'', user?.displayName||user?.name||'');
+        await notifyTaskCreated(taskTokens, fTitle, currentVenue?.name||'', user?.name||user?.name||'');
       }
     } catch(err:any){Alert.alert('Error',err.message);}
     setSaving(false);

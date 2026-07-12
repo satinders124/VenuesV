@@ -179,7 +179,7 @@ export default function IssuesScreen() {
           fileData = await response.blob();
         } else {
           // For mobile
-          const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+          const base64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' as any });
           fileData = decode(base64);
         }
         
@@ -210,7 +210,7 @@ export default function IssuesScreen() {
       
       const { error } = await supabase.from('issues').insert([{
         title:newTitle, zone:newZone, priority:newPriority,
-        status:'open', by:user?.displayName || user?.name,
+        status:'open', by:user?.name || user?.name,
         venueId:newVenueId,
         photoUrls
       }]);
@@ -237,7 +237,7 @@ export default function IssuesScreen() {
         status:'resolved',
         resolvedPhotoUrls,
         resolvedNote: resolveNote,
-        resolvedBy: user?.displayName || user?.name,
+        resolvedBy: user?.name || user?.name,
         resolvedAt: new Date().toISOString(),
       }).eq('id', resolveIssueId);
       
@@ -263,7 +263,7 @@ export default function IssuesScreen() {
     setDownloading(true);
     try {
       const url = viewerPhotos[viewerIndex];
-      const uri = FileSystem.documentDirectory + `issue_${Date.now()}.jpg`;
+      const uri = (FileSystem.documentDirectory || '') + `issue_${Date.now()}.jpg`;
       await FileSystem.downloadAsync(url, uri);
       await MediaLibrary.saveToLibraryAsync(uri);
       Alert.alert('Saved', 'Photo saved to your library.');

@@ -58,7 +58,7 @@ export default function ChatScreen() {
   const listRef = useRef<FlatList>(null);
 
   const getDmId = (memberName: string) => {
-    const names = [user?.name||user?.displayName||'', memberName].sort();
+    const names = [user?.name||user?.name||'', memberName].sort();
     return `dm_${names[0].replace(/\s/g,'_')}_${names[1].replace(/\s/g,'_')}`;
   };
 
@@ -169,7 +169,7 @@ export default function ChatScreen() {
     setSending(true);
     try {
       const msgText = text.trim();
-      const userName = user?.displayName || user?.name || '';
+      const userName = user?.name || user?.name || '';
       
       const { error } = await supabase.from('chat_messages').insert([{
         roomId: activeRoom.id,
@@ -218,11 +218,11 @@ export default function ChatScreen() {
     return new Date(ts).toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'});
   };
 
-  const isMe = (msg:Message) => msg.senderName === (user?.displayName || user?.name);
+  const isMe = (msg:Message) => msg.senderName === (user?.name || user?.name);
 
   const getChatRooms = (): ChatRoom[] => {
     const myRole = user?.role;
-    const userName = user?.displayName || user?.name || '';
+    const userName = user?.name || user?.name || '';
 
     if (filter === 'venues') {
       return venues.map(v => ({

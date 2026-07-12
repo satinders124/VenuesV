@@ -197,7 +197,7 @@ export default function ReportsScreen() {
   <div>
     <div class="report-title">Weekly Performance Report</div>
     <div class="report-date">${weekStart.toLocaleDateString('en-AU')} — ${now.toLocaleDateString('en-AU')}</div>
-    <div class="report-date">Prepared by ${user?.displayName || user?.name || 'Admin'}</div>
+    <div class="report-date">Prepared by ${user?.name || user?.name || 'Admin'}</div>
   </div>
 </div>
 

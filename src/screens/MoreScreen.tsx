@@ -102,11 +102,11 @@ export default function MoreScreen() {
         <View style={s.userCard}>
           <View style={[s.avatar, { backgroundColor: roleColor+'33' }]}>
             <Text style={[s.avatarText, { color: roleColor }]}>
-              {(user?.name || user?.displayName || 'User').split(' ').map((n:string) => n[0]).join('').slice(0,2)}
+              {(user?.name || user?.name || 'User').split(' ').map((n:string) => n[0]).join('').slice(0,2)}
             </Text>
           </View>
           <View style={s.userInfo}>
-            <Text style={s.userName}>{user?.name || user?.displayName}</Text>
+            <Text style={s.userName}>{user?.name || user?.name}</Text>
             <Text style={s.userEmail}>{user?.email}</Text>
           </View>
           <View style={[s.roleBadge, { backgroundColor: roleColor+'22' }]}>

@@ -33,7 +33,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
     if (!user) return [];
 
     const getDmId = (memberName: string) => {
-      const names = [user?.name||user?.displayName||'', memberName].sort();
+      const names = [user?.name||user?.name||'', memberName].sort();
       return `dm_${names[0].replace(/\s/g,'_')}_${names[1].replace(/\s/g,'_')}`;
     };
 
@@ -47,7 +47,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
 
     let roomIds: string[] = [...vList.map((v: any) => v.id)];
 
-    const userName = user?.displayName || user?.name || '';
+    const userName = user?.name || user?.name || '';
 
     const dmPartners = mList.filter((m: any) =>
       m.name !== userName && allowedRoles.includes(m.role)
@@ -150,7 +150,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
         
       if (!recentMessages) return;
       
-      const userName = user?.displayName || user?.name || '';
+      const userName = user?.name || user?.name || '';
       const newRoomUnreads: Record<string, RoomUnread> = {};
       
       roomIds.forEach(roomId => {

@@ -18,7 +18,7 @@ const UPDATE_STRIPE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/u
 type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; assignedUids?:string[]; };
 type Task   = { id:string; done:boolean; venueId:string; };
 type Issue  = { id:string; status:string; priority:string; venueId:string; };
-type Zone   = { id:string; name:string; icon:string; status:string; venueId:string; };
+type Zone   = { id:string; name:string; icon:string; status:string; venueId:string; score?:number; };
 type Member = { id:string; uid?:string; name:string; role:string; email:string; venue:string; venues?:string[]; };
 
 const VENUE_HEALTH = (score:number, issues:number) => {
