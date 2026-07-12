@@ -1,64 +1,62 @@
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, StyleSheet,
-  TouchableOpacity, TextInput, ScrollView,
-  Alert, ActivityIndicator, KeyboardAvoidingView, Platform
+  View, Text, TextInput, StyleSheet, SafeAreaView, TouchableOpacity,
+  ScrollView, ActivityIndicator, Alert, Linking, KeyboardAvoidingView, Platform
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { collection, addDoc, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
-import { db } from '../config/firebase';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
-import { Linking } from 'react-native';
 
-const UPDATE_STRIPE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/updateStripeVenueCount';
+const UPDATE_STRIPE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/updateStripeSubscription';
 
 const VENUE_TYPES = [
-  { id:'tavern',  emoji:'🍺', label:'Tavern / Pub'     },
-  { id:'hotel',   emoji:'🏨', label:'Hotel'            },
-  { id:'cafe',    emoji:'☕', label:'Cafe / Restaurant' },
-  { id:'club',    emoji:'🎵', label:'Club / Bar'       },
-  { id:'other',   emoji:'🏢', label:'Other'            },
+  { id: 'pub',         label: 'Pub / Hotel',  emoji: '🍺' },
+  { id: 'club',        label: 'Nightclub',    emoji: '🪩' },
+  { id: 'restaurant',  label: 'Restaurant',   emoji: '🍽️' },
+  { id: 'cafe',        label: 'Cafe',         emoji: '☕' },
+  { id: 'sports',      label: 'Sports Club',  emoji: '🏏' },
+  { id: 'other',       label: 'Other',        emoji: '🏢' },
 ];
 
 const ZONES_PRESETS: Record<string, string[]> = {
-  tavern:  ['Front Bar','Beer Garden','Restrooms — M','Restrooms — F','Gaming Room','Carpark','Kitchen Entry'],
-  hotel:   ['Lobby','Restaurant','Restrooms','Carpark','Function Room','Pool Area'],
-  cafe:    ['Dining Area','Kitchen Entry','Restrooms','Outdoor Seating'],
-  club:    ['Main Floor','Bar Area','Restrooms','Smoking Area','Entry'],
-  other:   ['Main Area','Restrooms','Carpark'],
+  pub:        ['Front Bar', 'Beer Garden', 'Gaming Room', 'Restrooms', 'Carpark'],
+  club:       ['Main Floor', 'Bar Area', 'Restrooms', 'Smoking Area', 'Entry'],
+  restaurant: ['Dining Area', 'Kitchen Entry', 'Restrooms', 'Outdoor Seating'],
+  cafe:       ['Main Area', 'Counter', 'Restrooms', 'Outdoor Seating'],
+  sports:     ['Main Bar', 'Function Room', 'Restrooms', 'Locker Rooms', 'Carpark'],
+  other:      ['Main Area', 'Restrooms', 'Entry', 'Staff Area'],
 };
 
 export default function AddVenueScreen() {
   const { user } = useAuth();
-  const navigation = useNavigation<any>();
+  const navigation = useNavigation();
 
-  const [name,     setName]     = useState('');
-  const [suburb,   setSuburb]   = useState('');
-  const [type,     setType]     = useState('tavern');
-  const [saving,   setSaving]   = useState(false);
+  const [name, setName]     = useState('');
+  const [suburb, setSuburb] = useState('');
+  const [type, setType]     = useState('pub');
+  const [saving, setSaving] = useState(false);
 
-  // For managers: need their existing venue's ownerId + that venue's own
-  // doc ID, so the new venue can be created under the same owner.
-  const [managerOwnerId, setManagerOwnerId]       = useState<string | null>(null);
-  const [managerExistingVenueId, setManagerExistingVenueId] = useState<string | null>(null);
-  const [resolvingOwner, setResolvingOwner]       = useState(false);
+  // For managers linking a new venue back to the business owner
+  const [resolvingOwner, setResolvingOwner] = useState(false);
+  const [managerOwnerId, setManagerOwnerId] = useState<string|null>(null);
+  const [managerExistingVenueId, setManagerExistingVenueId] = useState<string|null>(null);
 
   useEffect(() => {
-    if (user?.role !== 'manager') return;
-    const myVenueName = user?.venue || (user as any)?.venues?.[0];
-    if (!myVenueName) return;
-
-    setResolvingOwner(true);
+    if (user?.role !== 'manager' || !user?.venue) return;
     (async () => {
+      setResolvingOwner(true);
       try {
-        const snap = await getDocs(
-          query(collection(db, 'venues'), where('name', '==', myVenueName))
-        );
-        if (!snap.empty) {
-          const venueDoc = snap.docs[0];
-          setManagerOwnerId(venueDoc.data().ownerId || null);
-          setManagerExistingVenueId(venueDoc.id);
+        const myVenueName = user.venue;
+        const { data, error } = await supabase
+          .from('venues')
+          .select('ownerId, id')
+          .eq('name', myVenueName)
+          .limit(1)
+          .single();
+
+        if (data) {
+          setManagerOwnerId(data.ownerId || null);
+          setManagerExistingVenueId(data.id);
         }
       } catch (err) {
         console.log('Could not resolve manager owner:', err);
@@ -84,10 +82,12 @@ export default function AddVenueScreen() {
 
     // If subscribed, warn about price increase before proceeding
     if (user?.subscriptionStatus === 'active') {
-      const venueSnap = await getDocs(
-        query(collection(db, 'venues'), where('ownerId', '==', user?.uid))
-      );
-      const currentCount = venueSnap.size;
+      const { count } = await supabase
+        .from('venues')
+        .select('*', { count: 'exact', head: true })
+        .eq('ownerId', user?.uid);
+        
+      const currentCount = count || 0;
       const newCount = currentCount + 1;
       const newWeekly = (newCount * 19.95).toFixed(2);
       const added = (19.95).toFixed(2);
@@ -111,7 +111,6 @@ New weekly total: $${newWeekly} AUD
   };
 
   const _doAddVenue = async () => {
-
     const isManager = user?.role === 'manager';
     if (isManager && (!managerOwnerId || !managerExistingVenueId)) {
       Alert.alert(
@@ -129,18 +128,21 @@ New weekly total: $${newWeekly} AUD
         type,
         score: 100,
         ownerId: isManager ? managerOwnerId : user?.uid,
-        // The creator (owner or manager) is immediately assigned so they
-        // can see/manage the venue right after creation. assignedUids is
-        // what the Firestore security rules use for structurally-verifiable
-        // array-contains queries.
         assignedUids: isManager && user?.uid ? [user.uid] : [],
-        createdAt: serverTimestamp(),
       };
+      
       if (isManager) {
         venuePayload.existingVenueId = managerExistingVenueId;
       }
 
-      const venueRef = await addDoc(collection(db, 'venues'), venuePayload);
+      // Insert the venue
+      const { data: venueData, error: venueError } = await supabase
+        .from('venues')
+        .insert([venuePayload])
+        .select()
+        .single();
+
+      if (venueError) throw venueError;
 
       // Auto-create default zones for this venue type
       const defaultZones = ZONES_PRESETS[type] || ZONES_PRESETS.other;
@@ -154,23 +156,26 @@ New weekly total: $${newWeekly} AUD
         'Main Area':'🏢',
       };
 
-      await Promise.all(defaultZones.map(zoneName =>
-        addDoc(collection(db, 'zones'), {
-          name: zoneName,
-          icon: zoneIcons[zoneName] || '📍',
-          status: 'clean',
-          score: 100,
-          venueId: venueRef.id,
-          createdAt: serverTimestamp(),
-        })
-      ));
+      const zonesToInsert = defaultZones.map(zoneName => ({
+        name: zoneName,
+        icon: zoneIcons[zoneName] || '📍',
+        status: 'clean',
+        score: 100,
+        venueId: venueData.id,
+      }));
+
+      const { error: zonesError } = await supabase
+        .from('zones')
+        .insert(zonesToInsert);
+
+      if (zonesError) throw zonesError;
 
       // Sync venue count with Stripe (only if subscribed — function handles skip logic)
       fetch(UPDATE_STRIPE_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ uid: isManager ? managerOwnerId : user?.uid }),
-      }).catch(() => {}); // fire and forget — non-blocking
+      }).catch(() => {}); // fire and forget
 
       Alert.alert(
         '✅ Venue Added!',
