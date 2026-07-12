@@ -1,12 +1,5 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
-import {
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  signOut,
-  onAuthStateChanged,
-} from 'firebase/auth';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
-import { auth, db } from '../config/firebase';
+import { supabase } from '../config/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Role = 'owner' | 'manager' | 'cleaner' | 'staff';
@@ -64,6 +57,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return days > 0 ? days : 0;
   })();
 
+  const fetchUserData = async (uid: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('uid', uid)
+        .single();
+        
+      if (data) {
+        const userData = { ...data } as User;
+        setUser(userData);
+        AsyncStorage.setItem(USER_CACHE_KEY, JSON.stringify(userData)).catch(() => {});
+      } else {
+        setUser(null);
+        AsyncStorage.removeItem(USER_CACHE_KEY).catch(() => {});
+      }
+    } catch {
+      // Keep cached user if fetch fails
+    }
+  };
+
   useEffect(() => {
     // Load cached user immediately so app opens fast
     AsyncStorage.getItem(USER_CACHE_KEY).then(cached => {
@@ -73,59 +87,58 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     }).catch(() => {});
 
-    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        try {
-          const snap = await getDoc(doc(db, 'users', firebaseUser.uid));
-          if (snap.exists()) {
-            const userData = { uid: firebaseUser.uid, ...snap.data() } as User;
-            setUser(userData);
-            // Cache for next time
-            AsyncStorage.setItem(USER_CACHE_KEY, JSON.stringify(userData)).catch(() => {});
-          } else {
-            setUser(null);
-            AsyncStorage.removeItem(USER_CACHE_KEY).catch(() => {});
-          }
-        } catch {
-          // Keep cached user if Firestore fails
-        }
+    // Check active sessions and sets the user
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        fetchUserData(session.user.id);
       } else {
         setUser(null);
         AsyncStorage.removeItem(USER_CACHE_KEY).catch(() => {});
       }
       setLoading(false);
     });
-    return unsub;
+
+    // Listen for changes on auth state (sign in, sign out, etc.)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        await fetchUserData(session.user.id);
+      } else {
+        setUser(null);
+        AsyncStorage.removeItem(USER_CACHE_KEY).catch(() => {});
+      }
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const login = async (email: string, password: string) => {
-    await signInWithEmailAndPassword(auth, email, password);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
   };
 
   const register = async (
     email: string, password: string,
     name: string, role: Role, venue: string
   ) => {
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
-    const profile = { name, email, role, venue };
-    await setDoc(doc(db, 'users', cred.user.uid), profile);
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    if (error) throw error;
+    if (data.user) {
+      const profile = { uid: data.user.id, name, email, role, venue };
+      const { error: dbError } = await supabase.from('users').insert([profile]);
+      if (dbError) throw dbError;
+    }
   };
 
   const refreshUser = async () => {
-    const firebaseUser = auth.currentUser;
-    if (!firebaseUser) return;
-    try {
-      const snap = await getDoc(doc(db, 'users', firebaseUser.uid));
-      if (snap.exists()) {
-        const userData = { uid: firebaseUser.uid, ...snap.data() } as User;
-        setUser(userData);
-        AsyncStorage.setItem(USER_CACHE_KEY, JSON.stringify(userData)).catch(() => {});
-      }
-    } catch { }
+    const { data } = await supabase.auth.getSession();
+    if (data.session?.user) {
+      await fetchUserData(data.session.user.id);
+    }
   };
 
   const logout = async () => {
-    await signOut(auth);
+    await supabase.auth.signOut();
     setUser(null);
     AsyncStorage.removeItem(USER_CACHE_KEY).catch(() => {});
   };

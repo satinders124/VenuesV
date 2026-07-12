@@ -1,15 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, ActivityIndicator
+  TouchableOpacity, ActivityIndicator, RefreshControl
 } from 'react-native';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { RefreshControl } from 'react-native';
 
 const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
 
@@ -26,27 +23,11 @@ export default function DashboardScreen() {
   const navigation = useNavigation<any>();
 
   const [refreshing, setRefreshing] = useState(false);
-
-  const onRefresh = async () => {
-    setRefreshing(true);
-    // Re-fetch team members on pull-to-refresh since they're no longer
-    // a live listener (see comment below on why).
-    if (venues.length > 0) await fetchAllMembers(venues);
-    setTimeout(() => setRefreshing(false), 1000);
-  };
-
   const [venues,  setVenues]  = useState<Venue[]>([]);
   const [issues,  setIssues]  = useState<Issue[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Team members are fetched via a Cloud Function (getVenueTeamMembers)
-  // instead of a live Firestore listener. This is required because
-  // Firestore security rules can't structurally verify "does this user
-  // share a venue with me" for a client-side collection query — that
-  // check has to happen server-side. Trade-off: member list is a
-  // point-in-time snapshot, refreshed on load and pull-to-refresh,
-  // not real-time.
   const fetchAllMembers = async (venueList: Venue[]) => {
     try {
       const results = await Promise.all(
@@ -59,7 +40,6 @@ export default function DashboardScreen() {
         )
       );
       const allMembers = results.flatMap(r => r.members || []);
-      // De-duplicate by id (a member could appear in multiple venues)
       const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
       setMembers(unique as Member[]);
     } catch (err) {
@@ -67,40 +47,59 @@ export default function DashboardScreen() {
     }
   };
 
-  useEffect(() => {
+  const fetchData = useCallback(async () => {
     if (!user) return;
-
-    const venuesQuery = user.role === 'owner'
-      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
-      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
-
-    let unsubIssues: (() => void) | null = null;
-
-    const u1 = safeOnSnapshot(venuesQuery, s => {
-      const venueList = s.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Venue[];
-      setVenues(venueList);
-      setLoading(false);
-
-      const venueIds = venueList.map(v => v.id);
-
-      if (unsubIssues) unsubIssues();
-      if (venueIds.length > 0) {
-        unsubIssues = safeOnSnapshot(
-          query(collection(db, 'issues'), where('venueId', 'in', venueIds.slice(0, 30))),
-          s2 => setIssues(s2.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Issue[])
-        );
+    
+    try {
+      let venuesData: Venue[] = [];
+      if (user.role === 'owner') {
+        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+        venuesData = (data || []) as Venue[];
+      } else {
+        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+        venuesData = (data || []) as Venue[];
+      }
+      
+      setVenues(venuesData);
+      
+      if (venuesData.length > 0) {
+        const venueIds = venuesData.map(v => v.id);
+        const { data: issuesData } = await supabase
+          .from('issues')
+          .select('*')
+          .in('venueId', venueIds.slice(0, 30));
+        setIssues((issuesData || []) as Issue[]);
       } else {
         setIssues([]);
       }
+      
+      await fetchAllMembers(venuesData);
+    } catch (err) {
+      console.log('Error fetching dashboard data', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [user]);
 
-      fetchAllMembers(venueList);
-    });
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchData();
+  };
+
+  useEffect(() => {
+    fetchData();
+
+    // Setup Supabase Realtime subscriptions
+    const channel = supabase.channel('dashboard_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'venues' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'issues' }, () => fetchData())
+      .subscribe();
 
     return () => {
-      u1();
-      if (unsubIssues) unsubIssues();
+      supabase.removeChannel(channel);
     };
-  }, [user]);
+  }, [fetchData]);
 
   const openIssues   = issues.filter(i=>i.status!=='resolved');
   const highIssues   = openIssues.filter(i=>i.priority==='high');
@@ -111,10 +110,10 @@ export default function DashboardScreen() {
     openIssues.some(i=>i.venueId===v.id)
   );
 
-  const formatDate = (ts:any) => {
-    if (!ts?.toDate) return 'Just now';
-    const d = ts.toDate();
-    const diff = Date.now()-d.getTime();
+  const formatDate = (dateString: any) => {
+    if (!dateString) return 'Just now';
+    const d = new Date(dateString);
+    const diff = Date.now() - d.getTime();
     if (diff<3600000) return `${Math.floor(diff/60000)}m ago`;
     if (diff<86400000) return `${Math.floor(diff/3600000)}h ago`;
     return d.toLocaleDateString('en-AU',{day:'numeric',month:'short'});
@@ -133,64 +132,44 @@ export default function DashboardScreen() {
   return (
     <SafeAreaView style={s.container}>
       <ScrollView
-  contentContainerStyle={s.scroll}
-  refreshControl={
-    <RefreshControl
-      refreshing={refreshing}
-      onRefresh={onRefresh}
-      tintColor="#00c896"
-      colors={['#00c896']}
-    />
-  }
->
-
-        {/* Header */}
+        contentContainerStyle={s.scroll}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#00c896" colors={['#00c896']} />
+        }
+      >
         <View style={s.header}>
           <View>
             <Text style={s.greeting}>{greeting},</Text>
-            <Text style={s.name}>{user?.name?.split(' ')[0]} 👋</Text>
+            <Text style={s.name}>{user?.name?.split(' ')[0] || user?.displayName?.split(' ')[0]} 👋</Text>
           </View>
           <View style={s.dateBadge}>
             <Text style={s.dateText}>{now.toLocaleDateString('en-AU',{weekday:'short',day:'numeric',month:'short'})}</Text>
           </View>
         </View>
 
-        {/* 4 stat boxes */}
         <View style={s.statsGrid}>
           <View style={s.statCard}>
-            <View style={[s.statIcon,{backgroundColor:'#2c7ef722'}]}>
-              <Ionicons name="person-outline" color="#2c7ef7" size={20}/>
-            </View>
+            <View style={[s.statIcon,{backgroundColor:'#2c7ef722'}]}><Ionicons name="person-outline" color="#2c7ef7" size={20}/></View>
             <Text style={[s.statVal,{color:'#2c7ef7'}]}>{managers.length}</Text>
             <Text style={s.statLabel}>Site Managers</Text>
           </View>
-
           <View style={s.statCard}>
-            <View style={[s.statIcon,{backgroundColor:'#a855f722'}]}>
-              <Ionicons name="people-outline" color="#a855f7" size={20}/>
-            </View>
+            <View style={[s.statIcon,{backgroundColor:'#a855f722'}]}><Ionicons name="people-outline" color="#a855f7" size={20}/></View>
             <Text style={[s.statVal,{color:'#a855f7'}]}>{staff.length}</Text>
             <Text style={s.statLabel}>Staff</Text>
           </View>
-
           <View style={s.statCard}>
-            <View style={[s.statIcon,{backgroundColor:openIssues.length>0?'#f24e6e22':'#00c89622'}]}>
-              <Ionicons name="warning-outline" color={openIssues.length>0?'#f24e6e':'#00c896'} size={20}/>
-            </View>
+            <View style={[s.statIcon,{backgroundColor:openIssues.length>0?'#f24e6e22':'#00c89622'}]}><Ionicons name="warning-outline" color={openIssues.length>0?'#f24e6e':'#00c896'} size={20}/></View>
             <Text style={[s.statVal,{color:openIssues.length>0?'#f24e6e':'#00c896'}]}>{openIssues.length}</Text>
             <Text style={s.statLabel}>Open Issues</Text>
           </View>
-
           <View style={s.statCard}>
-            <View style={[s.statIcon,{backgroundColor:'#00c89622'}]}>
-              <Ionicons name="business-outline" color="#00c896" size={20}/>
-            </View>
+            <View style={[s.statIcon,{backgroundColor:'#00c89622'}]}><Ionicons name="business-outline" color="#00c896" size={20}/></View>
             <Text style={[s.statVal,{color:'#00c896'}]}>{venues.length}</Text>
             <Text style={s.statLabel}>Venues</Text>
           </View>
         </View>
 
-        {/* Venue Status */}
         <View style={s.section}>
           <Text style={s.sectionTitle}>Venue Status</Text>
           {venuesWithIssues.length===0?(
@@ -207,11 +186,7 @@ export default function DashboardScreen() {
               const vLow     = vIssues.filter(i=>i.priority==='low').length;
               const scoreColor = (v.score||0)>=85?'#00c896':(v.score||0)>=70?'#f5a623':'#f24e6e';
               return (
-                <TouchableOpacity
-                  key={v.id}
-                  style={[s.venueCard,{borderLeftColor:vHigh>0?'#f24e6e':'#f5a623'}]}
-                  onPress={()=>navigation.navigate('Issues')}
-                >
+                <TouchableOpacity key={v.id} style={[s.venueCard,{borderLeftColor:vHigh>0?'#f24e6e':'#f5a623'}]} onPress={()=>navigation.navigate('Issues')}>
                   <View style={s.venueCardTop}>
                     <View style={s.venueCardLeft}>
                       <Text style={s.venueCardName}>{v.name}</Text>
@@ -220,28 +195,10 @@ export default function DashboardScreen() {
                     <Text style={[s.venueCardScore,{color:scoreColor}]}>{v.score||0}%</Text>
                   </View>
                   <View style={s.issuePills}>
-                    {vHigh>0&&(
-                      <View style={s.issuePill}>
-                        <View style={[s.pillDot,{backgroundColor:'#f24e6e'}]}/>
-                        <Text style={[s.pillText,{color:'#f24e6e'}]}>{vHigh} High</Text>
-                      </View>
-                    )}
-                    {vMedium>0&&(
-                      <View style={s.issuePill}>
-                        <View style={[s.pillDot,{backgroundColor:'#f5a623'}]}/>
-                        <Text style={[s.pillText,{color:'#f5a623'}]}>{vMedium} Medium</Text>
-                      </View>
-                    )}
-                    {vLow>0&&(
-                      <View style={s.issuePill}>
-                        <View style={[s.pillDot,{backgroundColor:'#00c896'}]}/>
-                        <Text style={[s.pillText,{color:'#00c896'}]}>{vLow} Low</Text>
-                      </View>
-                    )}
-                    <View style={s.viewIssuesBtn}>
-                      <Text style={s.viewIssuesText}>View Issues</Text>
-                      <Ionicons name="chevron-forward" color="#2c7ef7" size={12}/>
-                    </View>
+                    {vHigh>0&&<View style={s.issuePill}><View style={[s.pillDot,{backgroundColor:'#f24e6e'}]}/><Text style={[s.pillText,{color:'#f24e6e'}]}>{vHigh} High</Text></View>}
+                    {vMedium>0&&<View style={s.issuePill}><View style={[s.pillDot,{backgroundColor:'#f5a623'}]}/><Text style={[s.pillText,{color:'#f5a623'}]}>{vMedium} Medium</Text></View>}
+                    {vLow>0&&<View style={s.issuePill}><View style={[s.pillDot,{backgroundColor:'#00c896'}]}/><Text style={[s.pillText,{color:'#00c896'}]}>{vLow} Low</Text></View>}
+                    <View style={s.viewIssuesBtn}><Text style={s.viewIssuesText}>View Issues</Text><Ionicons name="chevron-forward" color="#2c7ef7" size={12}/></View>
                   </View>
                 </TouchableOpacity>
               );
@@ -249,17 +206,11 @@ export default function DashboardScreen() {
           )}
         </View>
 
-        {/* High Priority Issues */}
         <View style={s.section}>
           <View style={s.sectionRow}>
             <Text style={s.sectionTitle}>High Priority Issues</Text>
-            {highIssues.length>0&&(
-              <TouchableOpacity onPress={()=>navigation.navigate('Issues')}>
-                <Text style={s.sectionLink}>View all</Text>
-              </TouchableOpacity>
-            )}
+            {highIssues.length>0&&<TouchableOpacity onPress={()=>navigation.navigate('Issues')}><Text style={s.sectionLink}>View all</Text></TouchableOpacity>}
           </View>
-
           {highIssues.length===0?(
             <View style={s.allGoodCard}>
               <Ionicons name="checkmark-circle" color="#00c896" size={32}/>
@@ -270,21 +221,13 @@ export default function DashboardScreen() {
             highIssues.slice(0,5).map(issue=>{
               const venue = venues.find(v=>v.id===issue.venueId);
               return (
-                <TouchableOpacity
-                  key={issue.id}
-                  style={s.issueCard}
-                  onPress={()=>navigation.navigate('Issues')}
-                >
+                <TouchableOpacity key={issue.id} style={s.issueCard} onPress={()=>navigation.navigate('Issues')}>
                   <View style={s.issueLeft}>
                     <View style={s.issueTitleRow}>
-                      <View style={s.highBadge}>
-                        <Text style={s.highBadgeText}>HIGH</Text>
-                      </View>
+                      <View style={s.highBadge}><Text style={s.highBadgeText}>HIGH</Text></View>
                       <Text style={s.issueTitle} numberOfLines={1}>{issue.title}</Text>
                     </View>
-                    <Text style={s.issueMeta}>
-                      🏢 {venue?.name||'Unknown'} · 📍 {issue.zone}
-                    </Text>
+                    <Text style={s.issueMeta}>🏢 {venue?.name||'Unknown'} · 📍 {issue.zone}</Text>
                     <Text style={s.issueBy}>Reported by {issue.by} · {formatDate(issue.createdAt)}</Text>
                   </View>
                   <Ionicons name="chevron-forward" color="#3a4252" size={16}/>
@@ -292,13 +235,7 @@ export default function DashboardScreen() {
               );
             })
           )}
-          {highIssues.length>5&&(
-            <TouchableOpacity style={s.moreBtn} onPress={()=>navigation.navigate('Issues')}>
-              <Text style={s.moreBtnText}>+{highIssues.length-5} more high priority issues</Text>
-            </TouchableOpacity>
-          )}
         </View>
-
       </ScrollView>
     </SafeAreaView>
   );
@@ -344,6 +281,4 @@ const s = StyleSheet.create({
   issueTitle:      {fontSize:13,fontWeight:'700',color:'#eef0f4',flex:1},
   issueMeta:       {fontSize:11,color:'#6e7a8a'},
   issueBy:         {fontSize:11,color:'#3a4252'},
-  moreBtn:         {backgroundColor:'rgba(44,126,247,.08)',borderWidth:1,borderColor:'rgba(44,126,247,.2)',borderRadius:10,padding:12,alignItems:'center'},
-  moreBtnText:     {fontSize:13,color:'#2c7ef7',fontWeight:'600'},
 });

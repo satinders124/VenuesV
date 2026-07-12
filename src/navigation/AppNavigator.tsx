@@ -1,13 +1,11 @@
 import 'react-native-gesture-handler';
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { View } from 'react-native';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import { supabase } from '../config/supabase';
 
 import { useAuth } from '../context/AuthContext';
 import SubscriptionBanner from '../components/SubscriptionBanner';
@@ -41,38 +39,48 @@ const TAB_OPTIONS = {
   tabBarLabelStyle: { fontSize: 11, fontWeight: '700' as const },
 };
 
-function getMyVenuesQuery(user: any) {
-  if (!user) return null;
-  if (user.role === 'owner') {
-    return query(collection(db, 'venues'), where('ownerId', '==', user.uid));
-  }
-  return query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
-}
-
 function useIssuesBadge() {
   const { user } = useAuth();
   const [issueCount, setIssueCount] = useState(0);
 
-  useEffect(() => {
-    if (!user) return;
-    const venuesQuery = getMyVenuesQuery(user);
-    if (!venuesQuery) { setIssueCount(0); return; }
-    const unsubVenues = safeOnSnapshot(venuesQuery, venueSnap => {
-      const venueIds = venueSnap.docs.map((d: any) => d.id);
+  const fetchIssuesCount = useCallback(async () => {
+    if (!user) { setIssueCount(0); return; }
+    try {
+      let venueIds: string[] = [];
+      if (user.role === 'owner') {
+        const { data } = await supabase.from('venues').select('id').eq('ownerId', user.uid);
+        venueIds = data?.map(d => d.id) || [];
+      } else {
+        const { data } = await supabase.from('venues').select('id').contains('assignedUids', [user.uid]);
+        venueIds = data?.map(d => d.id) || [];
+      }
+
       if (venueIds.length === 0) { setIssueCount(0); return; }
-      const idsForQuery = venueIds.slice(0, 30);
-      const unsubIssues = safeOnSnapshot(
-        query(
-          collection(db, 'issues'),
-          where('status', '==', 'open'),
-          where('venueId', 'in', idsForQuery)
-        ),
-        issueSnap => setIssueCount(issueSnap.size)
-      );
-      return unsubIssues;
-    });
-    return () => unsubVenues();
+
+      const { count } = await supabase
+        .from('issues')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'open')
+        .in('venueId', venueIds.slice(0, 30));
+        
+      setIssueCount(count || 0);
+    } catch (err) {
+      console.log('Error fetching issues count', err);
+    }
   }, [user]);
+
+  useEffect(() => {
+    fetchIssuesCount();
+    
+    if (!user) return;
+
+    const channel = supabase.channel('issues_badge_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'issues' }, fetchIssuesCount)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'venues' }, fetchIssuesCount)
+      .subscribe();
+      
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchIssuesCount, user]);
 
   return issueCount;
 }
