@@ -13,7 +13,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { RefreshControl } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
 import { decode } from 'base64-arraybuffer';
-import * as FileSystem from 'expo-file-system';
+// The download/read helpers used below are provided by Expo's legacy API in SDK 54.
+import * as FileSystem from 'expo-file-system/legacy';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 

@@ -28,13 +28,9 @@ export default function SubscriptionBanner() {
   if (!shouldShow) return null;
 
   const openSubscribe = () => {
-    // Pass uid+email as params so the subscribe page doesn't need
-    // a browser Firebase session — browser and app are separate contexts.
-    const params = new URLSearchParams();
-    if (user?.uid)   params.set('uid',   user.uid);
-    if (user?.email) params.set('email', user.email);
-    const url = `${SUBSCRIBE_BASE}?${params.toString()}`;
-    Linking.openURL(url).catch(() => {});
+    // The Vercel billing page authenticates against Supabase itself. Never put
+    // a uid, email address, or access token in a browser URL.
+    Linking.openURL(SUBSCRIBE_BASE).catch(() => {});
   };
 
   if (isLocked) {

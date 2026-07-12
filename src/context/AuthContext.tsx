@@ -121,13 +121,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     email: string, password: string,
     name: string, role: Role, venue: string
   ) => {
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    if (error) throw error;
-    if (data.user) {
-      const profile = { uid: data.user.id, name, email, role, venue };
-      const { error: dbError } = await supabase.from('users').insert([profile]);
-      if (dbError) throw dbError;
+    // The database auth trigger creates the profile. Keeping profile creation
+    // server-side prevents a client from assigning itself a privileged role.
+    if (role !== 'owner') {
+      throw new Error('Team members must be invited by a venue owner.');
     }
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { name, venue } },
+    });
+    if (error) throw error;
   };
 
   const refreshUser = async () => {
