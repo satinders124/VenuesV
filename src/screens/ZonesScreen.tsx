@@ -1,15 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView,
   FlatList, TouchableOpacity, Modal, ActivityIndicator,
   ScrollView, TextInput, Alert
 } from 'react-native';
-import {
-  collection, onSnapshot, updateDoc, deleteDoc,
-  doc, query, where, addDoc, serverTimestamp
-} from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 
 type ZoneStatus = 'clean' | 'attention' | 'working' | 'issue';
@@ -23,7 +18,7 @@ type Zone = {
   venueId: string;
 };
 
-type Venue = { id: string; name: string; ownerId?: string; };
+type Venue = { id: string; name: string; ownerId?: string; assignedUids?: string[]; };
 
 const STATUS_CONFIG: Record<ZoneStatus, { label: string; color: string }> = {
   clean:     { label:'✅ Clean',       color:'#00c896' },
@@ -59,54 +54,58 @@ export default function ZonesScreen() {
   const [newZoneIcon, setNewZoneIcon] = useState('📍');
   const [newVenueId,  setNewVenueId]  = useState('');
 
-  // ── Scoped venues + zones query ───────────────────────
-  // Owners filter by ownerId; everyone else by their assigned venue
-  // name(s). Zones are then re-subscribed using
-  // where('venueId','in', accessibleVenueIds) — fixes the previous
-  // hardcoded 'eagle-heights' fallback, which only worked for one
-  // specific test venue and broke for every other customer.
-  useEffect(() => {
+  const fetchData = useCallback(async () => {
     if (!user) return;
+    try {
+      let venuesData: Venue[] = [];
+      if (user.role === 'owner') {
+        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+        venuesData = (data || []) as Venue[];
+      } else {
+        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+        venuesData = (data || []) as Venue[];
+      }
+      
+      setVenues(venuesData);
+      if (venuesData.length > 0 && !newVenueId) setNewVenueId(venuesData[0].id);
 
-    const venuesQuery = user.role === 'owner'
-      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
-      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
-
-    let unsubZones: (() => void) | null = null;
-
-    const unsubVenues = safeOnSnapshot(venuesQuery, snap => {
-      const v = snap.docs.map((d: any) => ({ id:d.id, ...d.data() })) as Venue[];
-      setVenues(v);
-      if (v.length > 0 && !newVenueId) setNewVenueId(v[0].id);
-
-      if (unsubZones) unsubZones();
-      const venueIds = v.map(x => x.id).slice(0, 30);
-      if (venueIds.length > 0) {
-        unsubZones = safeOnSnapshot(
-          query(collection(db,'zones'), where('venueId','in',venueIds)),
-          snap2 => {
-            setZones(snap2.docs.map((d: any) => ({ id:d.id, ...d.data() })) as Zone[]);
-            setLoading(false);
-          }
-        );
+      if (venuesData.length > 0) {
+        const venueIds = venuesData.map(v => v.id).slice(0, 30);
+        const { data: zonesData } = await supabase
+          .from('zones')
+          .select('*')
+          .in('venueId', venueIds);
+          
+        setZones((zonesData || []) as Zone[]);
       } else {
         setZones([]);
-        setLoading(false);
       }
-    });
+    } catch (err) {
+      console.log('Error fetching zones data:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [user, newVenueId]);
 
-    return () => { unsubVenues(); if (unsubZones) unsubZones(); };
-  }, [user]);
+  useEffect(() => {
+    fetchData();
+
+    const channel = supabase.channel('zones_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'zones' }, () => fetchData())
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchData]);
 
   const updateStatus = async (id: string, status: ZoneStatus) => {
-    await updateDoc(doc(db, 'zones', id), { status });
+    await supabase.from('zones').update({ status }).eq('id', id);
     setSelected(prev => prev ? { ...prev, status } : null);
   };
 
   const saveEdit = async () => {
     if (!editName) { Alert.alert('Missing', 'Please enter zone name.'); return; }
     setSaving(true);
-    await updateDoc(doc(db, 'zones', selected!.id), { name: editName, icon: editIcon });
+    await supabase.from('zones').update({ name: editName, icon: editIcon }).eq('id', selected!.id);
     setSelected(prev => prev ? { ...prev, name: editName, icon: editIcon } : null);
     setEditMode(false);
     setSaving(false);
@@ -116,7 +115,7 @@ export default function ZonesScreen() {
     Alert.alert('Delete Zone', `Delete "${selected?.name}"? This cannot be undone.`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: async () => {
-        await deleteDoc(doc(db, 'zones', selected!.id));
+        await supabase.from('zones').delete().eq('id', selected!.id);
         setSelected(null);
         setEditMode(false);
       }},
@@ -126,14 +125,13 @@ export default function ZonesScreen() {
   const addZone = async () => {
     if (!newZoneName) { Alert.alert('Missing', 'Please enter zone name.'); return; }
     setSaving(true);
-    await addDoc(collection(db, 'zones'), {
+    await supabase.from('zones').insert([{
       name: newZoneName,
       icon: newZoneIcon,
       status: 'clean',
       score: 100,
-      venueId: newVenueId,
-      createdAt: serverTimestamp(),
-    });
+      venueId: newVenueId
+    }]);
     setAddModal(false);
     setNewZoneName('');
     setNewZoneIcon('📍');
@@ -256,43 +254,35 @@ export default function ZonesScreen() {
 
                 {!editMode ? (
                   <>
-                    {/* Status */}
-                    <Text style={[styles.modalStatus, {color: STATUS_CONFIG[selected.status]?.color}]}>
-                      {STATUS_CONFIG[selected.status]?.label}
+                    <Text style={[styles.modalStatus, {color: STATUS_CONFIG[selected.status].color}]}>
+                      {STATUS_CONFIG[selected.status].label}
                     </Text>
-                    <Text style={styles.modalScore}>Inspection score: {selected.score||0}%</Text>
+                    <Text style={styles.modalScore}>Score: {selected.score}%</Text>
                     <Text style={styles.modalVenue}>🏢 {getVenueName(selected.venueId)}</Text>
 
-                    {/* Update status — manager and cleaner only */}
-                    {user?.role !== 'owner' && (
-                      <>
-                        <Text style={styles.sectionLabel}>UPDATE STATUS</Text>
-                        <View style={styles.statusGrid}>
-                          {STATUS_OPTIONS.map(s => {
-                            const cfg = STATUS_CONFIG[s];
-                            const isActive = selected.status === s;
-                            return (
-                              <TouchableOpacity
-                                key={s}
-                                style={[styles.statusOption, isActive && {borderColor: cfg.color, backgroundColor: cfg.color+'18'}]}
-                                onPress={() => updateStatus(selected.id, s)}
-                              >
-                                <Text style={[styles.statusOptionText, isActive && {color: cfg.color}]}>{cfg.label}</Text>
-                              </TouchableOpacity>
-                            );
-                          })}
-                        </View>
-                      </>
-                    )}
+                    <Text style={styles.sectionLabel}>UPDATE STATUS</Text>
+                    <View style={styles.statusGrid}>
+                      {STATUS_OPTIONS.map(opt => {
+                        const cfg = STATUS_CONFIG[opt];
+                        return (
+                          <TouchableOpacity
+                            key={opt}
+                            style={[styles.statusOption, selected.status===opt && {borderColor:cfg.color, backgroundColor:`${cfg.color}11`}]}
+                            onPress={() => updateStatus(selected.id, opt)}
+                          >
+                            <Text style={[styles.statusOptionText, selected.status===opt && {color:cfg.color}]}>{cfg.label}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
 
-                    {/* Edit / Delete — owner and manager only */}
                     {canEdit && (
                       <View style={styles.actionRow}>
                         <TouchableOpacity style={styles.editBtn} onPress={() => setEditMode(true)}>
-                          <Text style={styles.editBtnText}>✏️ Edit Zone</Text>
+                          <Text style={styles.editBtnText}>Edit Zone</Text>
                         </TouchableOpacity>
                         <TouchableOpacity style={styles.deleteBtn} onPress={deleteZone}>
-                          <Text style={styles.deleteBtnText}>🗑️ Delete</Text>
+                          <Text style={styles.deleteBtnText}>Delete</Text>
                         </TouchableOpacity>
                       </View>
                     )}
@@ -303,7 +293,6 @@ export default function ZonesScreen() {
                   </>
                 ) : (
                   <>
-                    {/* Edit form */}
                     <Text style={styles.sectionLabel}>ZONE NAME</Text>
                     <TextInput
                       style={styles.input}

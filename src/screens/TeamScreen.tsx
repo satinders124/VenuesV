@@ -1,12 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, FlatList,
   TouchableOpacity, Modal, TextInput, Alert, ActivityIndicator,
   KeyboardAvoidingView, Platform, ScrollView
 } from 'react-native';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -52,9 +50,6 @@ export default function TeamScreen() {
   const [venueSearch, setVenueSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  // Team members fetched via Cloud Function — Firestore can't structurally
-  // verify a "do we share a venue" condition for a client-side query on
-  // the users collection. See getVenueTeamMembers Cloud Function.
   const fetchAllMembers = async (venueList: Venue[]) => {
     try {
       const results = await Promise.all(
@@ -69,35 +64,49 @@ export default function TeamScreen() {
       const allMembers = results.flatMap(r => r.members || []);
       const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
       setMembers(unique as Member[]);
-      setLoading(false);
     } catch (err) {
       console.log('fetchAllMembers error:', err);
-      setLoading(false);
     }
   };
 
-  const onRefresh = async () => {
+  const fetchData = useCallback(async () => {
+    if (!user) return;
+    try {
+      let vList: Venue[] = [];
+      if (user.role === 'owner') {
+        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+        vList = (data || []) as Venue[];
+      } else {
+        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+        vList = (data || []) as Venue[];
+      }
+      
+      setVenues(vList);
+      if (vList.length > 0 && !venueId) setVenueId(vList[0].id);
+
+      await fetchAllMembers(vList);
+    } catch (err) {
+      console.log('Error fetching team data:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [user]);
+
+  const onRefresh = () => {
     setRefreshing(true);
-    if (venues.length > 0) await fetchAllMembers(venues);
-    setTimeout(() => setRefreshing(false), 1000);
+    fetchData();
   };
 
   useEffect(() => {
-    if (!user) return;
+    fetchData();
 
-    const venuesQuery = user.role === 'owner'
-      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
-      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
+    const channel = supabase.channel('team_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'venues' }, () => fetchData())
+      .subscribe();
 
-    const u2 = safeOnSnapshot(venuesQuery, snap => {
-      const v = snap.docs.map((d: any) =>({id:d.id,...d.data()})) as Venue[];
-      setVenues(v);
-      if (v.length > 0 && !venueId) setVenueId(v[0].id);
-      fetchAllMembers(v);
-    });
-
-    return ()=>{u2();};
-  },[user]);
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchData]);
 
   const openInvite = () => {
     setRole(activeTab); setName(''); setEmail(''); setVenueSearch('');
@@ -129,7 +138,6 @@ export default function TeamScreen() {
           ? `${name} has been assigned to ${venueName}.`
           : `${name} will receive an email with login details.`
       );
-      // Refresh member list since this venue's assignedUids changed
       await fetchAllMembers(venues);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to invite team member.');
@@ -268,16 +276,18 @@ export default function TeamScreen() {
           return (
             <View style={s.memberCard}>
               <View style={[s.avatar,{backgroundColor:color+'33'}]}>
-                <Text style={[s.avatarText,{color}]}>{getInitials(m.name)}</Text>
+                <Text style={[s.avatarText,{color:color}]}>{getInitials(m.name)}</Text>
               </View>
               <View style={s.memberInfo}>
                 <Text style={s.memberName}>{m.name}</Text>
                 <Text style={s.memberEmail}>{m.email}</Text>
-                <Text style={s.memberVenue}>
-                  📍 {m.venues && m.venues.length > 1 ? m.venues.join(' · ') : m.venue}
-                </Text>
+                {m.venues && m.venues.length > 0 ? (
+                  <Text style={s.memberVenue}>🏢 {m.venues.filter(v=>myVenueNames.includes(v)).join(', ') || m.venues.join(', ')}</Text>
+                ) : (
+                  <Text style={s.memberVenue}>🏢 {m.venue}</Text>
+                )}
               </View>
-              {m.role!=='owner'&&(
+              {m.email !== user?.email && (
                 <TouchableOpacity style={s.removeBtn} disabled={removing} onPress={()=>{
                   if (m.venues && m.venues.length > 1) {
                     Alert.alert(

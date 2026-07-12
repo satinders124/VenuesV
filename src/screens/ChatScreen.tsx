@@ -4,18 +4,13 @@ import {
   TextInput, TouchableOpacity, KeyboardAvoidingView,
   Platform, ActivityIndicator, RefreshControl
 } from 'react-native';
-import {
-  collection, addDoc, onSnapshot, query,
-  orderBy, serverTimestamp, where
-} from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useUnread } from '../context/UnreadContext';
 import { Ionicons } from '@expo/vector-icons';
+import { notifyChatMessage } from '../config/notifications';
 
 const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
-import { notifyChatMessage } from '../config/notifications';
 
 type Message  = { id:string; text:string; senderName:string; senderRole:string; createdAt:any; };
 type Venue    = { id:string; name:string; suburb:string; ownerId?:string; assignedUids?:string[]; };
@@ -27,7 +22,6 @@ const ROLE_COLOR: Record<string,string> = {
   owner:'#f5a623', manager:'#2c7ef7', cleaner:'#00c896', staff:'#a855f7',
 };
 
-// Fetch push tokens for specific user uids via Cloud Function
 async function getTokensForUids(callerUid: string, venueId: string, uids: string[]): Promise<string[]> {
   try {
     const resp = await fetch(TEAM_URL, {
@@ -64,16 +58,13 @@ export default function ChatScreen() {
   const listRef = useRef<FlatList>(null);
 
   const getDmId = (memberName: string) => {
-    const names = [user?.name||'', memberName].sort();
+    const names = [user?.name||user?.displayName||'', memberName].sort();
     return `dm_${names[0].replace(/\s/g,'_')}_${names[1].replace(/\s/g,'_')}`;
   };
 
   const getInitials = (name:string) =>
     name?.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2)||'?';
 
-  // Team members fetched via Cloud Function — same reasoning as
-  // DashboardScreen/UnreadContext: Firestore can't structurally verify
-  // a "do we share a venue" condition for a client-side collection query.
   const fetchAllMembers = async (venueList: Venue[]) => {
     try {
       const results = await Promise.all(
@@ -93,34 +84,84 @@ export default function ChatScreen() {
     }
   };
 
-  // ── Scoped venues query ───────────────────────────────
   useEffect(() => {
     if (!user) return;
 
-    const venuesQuery = user.role === 'owner'
-      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
-      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
-
-    const u1 = safeOnSnapshot(venuesQuery, snap => {
-      const v = snap.docs.map((d: any) =>({id:d.id,...d.data()})) as Venue[];
-      setVenues(v);
-      setLoading(false);
-      fetchAllMembers(v);
-    });
-    return ()=>{ u1(); };
+    const fetchVenues = async () => {
+      try {
+        let v: Venue[] = [];
+        if (user.role === 'owner') {
+          const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+          v = (data || []) as Venue[];
+        } else {
+          const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+          v = (data || []) as Venue[];
+        }
+        setVenues(v);
+        setLoading(false);
+        fetchAllMembers(v);
+      } catch(err) {
+        console.log(err);
+      }
+    };
+    
+    fetchVenues();
+    
+    const channel = supabase.channel('venues_chat_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'venues' }, fetchVenues)
+      .subscribe();
+      
+    return () => { supabase.removeChannel(channel); };
   }, [user]);
 
-  // Load messages for active room
   useEffect(() => {
     if (!activeRoom) return;
     markRoomRead(activeRoom.id);
-    const q = query(collection(db,'chats',activeRoom.id,'messages'),orderBy('createdAt','asc'));
-    const unsub = safeOnSnapshot(q, snap => {
-      setMessages(snap.docs.map((d: any) =>({id:d.id,...d.data()})) as Message[]);
-      setTimeout(()=>listRef.current?.scrollToEnd({animated:true}),100);
+    
+    const fetchMessages = async () => {
+      const { data } = await supabase
+        .from('chat_messages')
+        .select('*')
+        .eq('roomId', activeRoom.id)
+        .order('created_at', { ascending: true });
+        
+      if (data) {
+        const mappedMsgs = data.map(d => ({
+          id: d.id,
+          text: d.text,
+          senderName: d.senderName,
+          senderRole: d.senderRole || 'staff', // Add a column or derive
+          createdAt: d.created_at
+        })) as Message[];
+        setMessages(mappedMsgs);
+        setTimeout(()=>listRef.current?.scrollToEnd({animated:true}),100);
+      }
       markRoomRead(activeRoom.id);
-    });
-    return unsub;
+    };
+    
+    fetchMessages();
+    
+    const channel = supabase.channel(`room_${activeRoom.id}`)
+      .on('postgres_changes', { 
+        event: 'INSERT', 
+        schema: 'public', 
+        table: 'chat_messages',
+        filter: `roomId=eq.${activeRoom.id}`
+      }, (payload) => {
+        const newMsg = payload.new;
+        setMessages(prev => [...prev, {
+          id: newMsg.id,
+          text: newMsg.text,
+          senderName: newMsg.senderName,
+          senderRole: newMsg.senderRole || 'staff',
+          createdAt: newMsg.created_at
+        } as Message]);
+        setTimeout(()=>listRef.current?.scrollToEnd({animated:true}),100);
+        markRoomRead(activeRoom.id);
+      })
+      .subscribe();
+      
+    return () => { supabase.removeChannel(channel); };
   }, [activeRoom]);
 
   const sendMessage = async () => {
@@ -128,32 +169,34 @@ export default function ChatScreen() {
     setSending(true);
     try {
       const msgText = text.trim();
-      await addDoc(collection(db,'chats',activeRoom.id,'messages'), {
+      const userName = user?.displayName || user?.name || '';
+      
+      const { error } = await supabase.from('chat_messages').insert([{
+        roomId: activeRoom.id,
         text: msgText,
-        senderName: user?.name,
-        senderRole: user?.role,
-        createdAt: serverTimestamp(),
-      });
+        senderId: user?.uid,
+        senderName: userName,
+        senderRole: user?.role
+      }]);
+      
+      if (error) throw error;
+      
       setText('');
       markRoomRead(activeRoom.id);
 
-      // Notify recipients — for DM rooms notify the other person,
-      // for venue group rooms notify all venue members except sender.
       if (activeRoom.type === 'dm') {
-        // Get the other person's uid from members list
         const otherName = activeRoom.name;
         const other = members.find((m: Member) => m.name === otherName);
         if (other?.id && venues[0]?.id) {
           const tokens = await getTokensForUids(user?.uid||'', venues[0].id, [other.id]);
-          await notifyChatMessage(tokens, user?.name||'', msgText, activeRoom.name);
+          await notifyChatMessage(tokens, userName, msgText, activeRoom.name);
         }
       } else {
-        // Venue group chat — notify all members except sender
         if (venues[0]?.id) {
           const allTokens = await getTokensForUids(user?.uid||'', activeRoom.id, members.map((m:Member)=>m.id));
-          const myToken = members.find((m:Member)=>m.name===user?.name)?.expoPushToken;
+          const myToken = members.find((m:Member)=>m.name===userName)?.expoPushToken;
           const tokens = allTokens.filter((t:string)=>t!==myToken);
-          await notifyChatMessage(tokens, user?.name||'', msgText, activeRoom.name);
+          await notifyChatMessage(tokens, userName, msgText, activeRoom.name);
         }
       }
     } catch(err){ console.error(err); }
@@ -161,8 +204,8 @@ export default function ChatScreen() {
   };
 
   const formatTime = (ts:any) => {
-    if (!ts?.toDate) return '';
-    const d = ts.toDate();
+    if (!ts) return '';
+    const d = new Date(ts);
     const diff = Date.now()-d.getTime();
     if (diff<60000) return 'now';
     if (diff<3600000) return `${Math.floor(diff/60000)}m ago`;
@@ -171,16 +214,16 @@ export default function ChatScreen() {
   };
 
   const formatMsgTime = (ts:any) => {
-    if (!ts?.toDate) return '';
-    return ts.toDate().toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'});
+    if (!ts) return '';
+    return new Date(ts).toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'});
   };
 
-  const isMe = (msg:Message) => msg.senderName===user?.name;
+  const isMe = (msg:Message) => msg.senderName === (user?.displayName || user?.name);
 
   const getChatRooms = (): ChatRoom[] => {
     const myRole = user?.role;
+    const userName = user?.displayName || user?.name || '';
 
-    // Venue group chats — everyone
     if (filter === 'venues') {
       return venues.map(v => ({
         id: v.id, name: v.name,
@@ -189,7 +232,6 @@ export default function ChatScreen() {
       }));
     }
 
-    // DM matrix per role
     const dmAllowed: Record<string, string[]> = {
       owner:   ['manager'],
       manager: ['owner', 'staff', 'cleaner'],
@@ -209,9 +251,9 @@ export default function ChatScreen() {
     };
 
     return members
-      .filter(m => m.role === targetRole && m.name !== user?.name)
+      .filter(m => m.role === targetRole && m.name !== userName)
       .map(m => ({
-        id: getDmId(m.id), name: m.name,
+        id: getDmId(m.name), name: m.name,
         subtitle: `${roleLabel[m.role] || m.role} · Direct Message`,
         type: 'dm' as const, avatar: getInitials(m.name),
         avatarColor: ROLE_COLOR[m.role] || '#6e7a8a',
@@ -220,7 +262,6 @@ export default function ChatScreen() {
 
   const rooms = getChatRooms();
 
-  // ── CHAT LIST ───────────────────────────────────────
   if (!activeRoom) {
     const filtersByRole: Record<string, {key:FilterType; label:string}[]> = {
       owner:   [{key:'venues',label:'Venues'},{key:'manager',label:'Managers'}],
@@ -248,52 +289,29 @@ export default function ChatScreen() {
         </View>
 
         <View style={s.filterRow}>
-  {filters.map(f=>{
-    const tabUnread = Object.entries(roomUnreads)
-  .filter(([roomId]) => {
-    if (f.key === 'venues') return !roomId.startsWith('dm_');
-    return roomId.startsWith('dm_');
-  })
-  .reduce((sum, [, r]) => sum + (r.count || 0), 0);
-    return (
-      <TouchableOpacity key={f.key} style={[s.filterTab,filter===f.key&&s.filterTabActive]} onPress={()=>setFilter(f.key)}>
-        <View style={{flexDirection:'row',alignItems:'center',gap:6}}>
-          <Text style={[s.filterTabText,filter===f.key&&s.filterTabTextActive]}>{f.label}</Text>
-          {tabUnread > 0 && (
-            <View style={{backgroundColor: filter===f.key?'#000':'#f24e6e',borderRadius:99,minWidth:16,height:16,paddingHorizontal:4,alignItems:'center',justifyContent:'center'}}>
-              <Text style={{fontSize:9,fontWeight:'800',color: filter===f.key?'#00c896':'#fff'}}>{tabUnread > 9?'9+':tabUnread}</Text>
-            </View>
-          )}
+          {filters.map(f => (
+            <TouchableOpacity key={f.key} style={[s.filterTab, filter===f.key&&s.filterTabActive]} onPress={()=>setFilter(f.key)}>
+              <Text style={[s.filterTabText, filter===f.key&&s.filterTabTextActive]}>{f.label}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
-      </TouchableOpacity>
-    );
-  })}
-</View>
 
         {loading
-          ?<ActivityIndicator color="#00c896" style={{marginTop:60}}/>
-          :<FlatList
-  data={rooms}
-  keyExtractor={r=>r.id}
-  refreshControl={
-    <RefreshControl
-      refreshing={false}
-      onRefresh={()=>{}}
-      tintColor="#00c896"
-      colors={['#00c896']}
-    />
-  }
-  ListEmptyComponent={
+          ? <ActivityIndicator color="#00c896" style={{marginTop:40}}/>
+          : <FlatList
+            data={rooms}
+            keyExtractor={item=>item.id}
+            ListEmptyComponent={
               <View style={s.emptyWrap}>
-                <Ionicons name="chatbubbles-outline" color="#3a4252" size={48}/>
-                <Text style={s.emptyText}>
-                  {filter==='manager'?'No manager assigned yet':'No chats found'}
-                </Text>
+                <Ionicons name="chatbubbles-outline" color="#3a4252" size={40}/>
+                <Text style={s.emptyText}>No {filter} found</Text>
               </View>
             }
             renderItem={({item:room})=>{
-              const last = roomUnreads[room.id]||null;
-              const unread = last?.count || 0;
+              const roomData = roomUnreads[room.id] || {count:0, lastText:'', lastTime:null};
+              const unread = roomData.count || 0;
+              const last = roomData.lastTime ? roomData : null;
+              
               return (
                 <TouchableOpacity style={s.chatItem} onPress={()=>setActiveRoom(room)}>
                   <View style={s.avatarWrap}>
@@ -328,7 +346,6 @@ export default function ChatScreen() {
     );
   }
 
-  // ── CONVERSATION ────────────────────────────────────
   return (
     <SafeAreaView style={s.container}>
       <View style={s.chatHeader}>

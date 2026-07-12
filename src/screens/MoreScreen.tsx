@@ -4,11 +4,7 @@ import {
   TouchableOpacity, ScrollView, Alert, Modal,
   TextInput, ActivityIndicator, KeyboardAvoidingView, Platform
 } from 'react-native';
-import {
-  updatePassword, reauthenticateWithCredential,
-  EmailAuthProvider,
-} from 'firebase/auth';
-import { auth } from '../config/firebase';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Linking } from 'react-native';
@@ -65,8 +61,8 @@ export default function MoreScreen() {
   };
 
   const handleChangePassword = async () => {
-    if (!currentPwd || !newPwd || !confirmPwd) {
-      Alert.alert('Missing fields', 'Please fill in all fields.');
+    if (!newPwd || !confirmPwd) {
+      Alert.alert('Missing fields', 'Please fill in the new password fields.');
       return;
     }
     if (newPwd.length < 6) {
@@ -80,26 +76,16 @@ export default function MoreScreen() {
 
     setChanging(true);
     try {
-      const fbUser = auth.currentUser;
-      if (!fbUser || !fbUser.email) throw new Error('Not signed in.');
+      const { error } = await supabase.auth.updateUser({
+        password: newPwd
+      });
 
-      // Firebase requires recent login to change password — reauthenticate first
-      const credential = EmailAuthProvider.credential(fbUser.email, currentPwd);
-      await reauthenticateWithCredential(fbUser, credential);
-      await updatePassword(fbUser, newPwd);
+      if (error) throw error;
 
       setPwdModalOpen(false);
       Alert.alert('✅ Password Changed', 'Your password has been updated successfully.');
     } catch (err: any) {
-      if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
-        Alert.alert('Error', 'Current password is incorrect.');
-      } else if (err.code === 'auth/weak-password') {
-        Alert.alert('Error', 'New password is too weak.');
-      } else if (err.code === 'auth/too-many-requests') {
-        Alert.alert('Error', 'Too many attempts. Please try again later.');
-      } else {
-        Alert.alert('Error', err.message || 'Failed to change password.');
-      }
+      Alert.alert('Error', err.message || 'Failed to change password.');
     }
     setChanging(false);
   };
@@ -116,11 +102,11 @@ export default function MoreScreen() {
         <View style={s.userCard}>
           <View style={[s.avatar, { backgroundColor: roleColor+'33' }]}>
             <Text style={[s.avatarText, { color: roleColor }]}>
-              {user?.name?.split(' ').map((n:string) => n[0]).join('').slice(0,2) || 'U'}
+              {(user?.name || user?.displayName || 'User').split(' ').map((n:string) => n[0]).join('').slice(0,2)}
             </Text>
           </View>
           <View style={s.userInfo}>
-            <Text style={s.userName}>{user?.name}</Text>
+            <Text style={s.userName}>{user?.name || user?.displayName}</Text>
             <Text style={s.userEmail}>{user?.email}</Text>
           </View>
           <View style={[s.roleBadge, { backgroundColor: roleColor+'22' }]}>
@@ -254,18 +240,6 @@ export default function MoreScreen() {
                   <Text style={s.modalClose}>✕</Text>
                 </TouchableOpacity>
               </View>
-
-              <Text style={s.fieldLabel}>CURRENT PASSWORD</Text>
-              <TextInput
-                style={s.input}
-                placeholder="Enter current password"
-                placeholderTextColor="#6e7a8a"
-                value={currentPwd}
-                onChangeText={setCurrentPwd}
-                secureTextEntry
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
 
               <Text style={s.fieldLabel}>NEW PASSWORD</Text>
               <TextInput

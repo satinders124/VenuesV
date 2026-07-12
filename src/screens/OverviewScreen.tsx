@@ -1,15 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
   TouchableOpacity, Modal, ActivityIndicator, TextInput,
   Alert, KeyboardAvoidingView, Platform
 } from 'react-native';
-import {
-  collection, onSnapshot, updateDoc, deleteDoc,
-  doc, addDoc, serverTimestamp, getDocs, query, where
-} from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -18,13 +13,13 @@ import { RefreshControl } from 'react-native';
 const INVITE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/inviteTeamMember';
 const REMOVE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/removeTeamMember';
 const TEAM_URL   = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
+const UPDATE_STRIPE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/updateStripeVenueCount';
 
 type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; assignedUids?:string[]; };
 type Task   = { id:string; done:boolean; venueId:string; };
 type Issue  = { id:string; status:string; priority:string; venueId:string; };
 type Zone   = { id:string; name:string; icon:string; status:string; venueId:string; };
 type Member = { id:string; uid?:string; name:string; role:string; email:string; venue:string; venues?:string[]; };
-
 
 const VENUE_HEALTH = (score:number, issues:number) => {
   if (issues === 0) return {label:'🟢 Good',       color:'#00c896'};
@@ -38,7 +33,6 @@ const ZONE_COLOR: Record<string,string> = {
 
 const ICONS = ['🍺','🌿','🚻','🚹','🎰','🚗','🍽️','🏨','☕','🎵','🚪','🏊','🎭','📍','🏢','🧹'];
 
-
 const ROLE_CONFIG: Record<string,{color:string;label:string}> = {
   owner:   {color:'#f5a623', label:'Owner'},
   manager: {color:'#2c7ef7', label:'Manager'},
@@ -51,8 +45,6 @@ const INVITE_ROLES = [
   {id:'cleaner', label:'Cleaner'},
   {id:'staff',   label:'Venue Staff'},
 ];
-
-const UPDATE_STRIPE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/updateStripeVenueCount';
 
 export default function OverviewScreen() {
   const { user } = useAuth();
@@ -90,8 +82,6 @@ export default function OverviewScreen() {
   const [memberSearch,    setMemberSearch]    = useState('');
   const [selectedMember,  setSelectedMember]  = useState<Member|null>(null);
 
-  // Team members fetched via Cloud Function — Firestore can't structurally
-  // verify "do we share a venue" for a client-side users query.
   const fetchAllMembers = async (venueList: Venue[]) => {
     try {
       const results = await Promise.all(
@@ -111,68 +101,68 @@ export default function OverviewScreen() {
     }
   };
 
-  const onRefresh = async () => {
-    setRefreshing(true);
-    if (venues.length > 0) await fetchAllMembers(venues);
-    setTimeout(() => setRefreshing(false), 1000);
-  };
-
-  // ── Scoped venues query + cascading tasks/issues/zones ──
-  useEffect(() => {
+  const fetchData = useCallback(async () => {
     if (!user) return;
-
-    const venuesQuery = user.role === 'owner'
-      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
-      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
-
-    let unsubTasks: (() => void) | null = null;
-    let unsubIssues: (() => void) | null = null;
-    let unsubZones: (() => void) | null = null;
-
-    const u1 = safeOnSnapshot(venuesQuery, s => {
-      const venueList = s.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Venue[];
-      setVenues(venueList);
-      setLoading(false);
-
+    try {
+      let vList: Venue[] = [];
+      if (user.role === 'owner') {
+        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+        vList = (data || []) as Venue[];
+      } else {
+        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+        vList = (data || []) as Venue[];
+      }
+      
+      setVenues(vList);
+      
       setSelVenue(prev => {
         if (!prev) return prev;
-        const updated = venueList.find(v => v.id === prev.id);
+        const updated = vList.find(v => v.id === prev.id);
         return updated || prev;
       });
 
-      const venueIds = venueList.map(v => v.id).slice(0, 30);
-
-      if (unsubTasks) unsubTasks();
-      if (unsubIssues) unsubIssues();
-      if (unsubZones) unsubZones();
-
+      const venueIds = vList.map(v => v.id).slice(0, 30);
+      
       if (venueIds.length > 0) {
-        unsubTasks = safeOnSnapshot(
-          query(collection(db, 'tasks'), where('venueId', 'in', venueIds)),
-          s2 => setTasks(s2.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Task[])
-        );
-        unsubIssues = safeOnSnapshot(
-          query(collection(db, 'issues'), where('venueId', 'in', venueIds)),
-          s3 => setIssues(s3.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Issue[])
-        );
-        unsubZones = safeOnSnapshot(
-          query(collection(db, 'zones'), where('venueId', 'in', venueIds)),
-          s4 => setZones(s4.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Zone[])
-        );
+        const [{data: tData}, {data: iData}, {data: zData}] = await Promise.all([
+          supabase.from('tasks').select('id, done, venueId').in('venueId', venueIds),
+          supabase.from('issues').select('id, status, priority, venueId').in('venueId', venueIds),
+          supabase.from('zones').select('id, name, icon, status, venueId').in('venueId', venueIds)
+        ]);
+        
+        setTasks((tData || []) as Task[]);
+        setIssues((iData || []) as Issue[]);
+        setZones((zData || []) as Zone[]);
       } else {
         setTasks([]); setIssues([]); setZones([]);
       }
 
-      fetchAllMembers(venueList);
-    });
-
-    return () => {
-      u1();
-      if (unsubTasks) unsubTasks();
-      if (unsubIssues) unsubIssues();
-      if (unsubZones) unsubZones();
-    };
+      await fetchAllMembers(vList);
+    } catch (err) {
+      console.log('Error fetching overview data:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
   }, [user]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchData();
+  };
+
+  useEffect(() => {
+    fetchData();
+
+    const channel = supabase.channel('overview_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'venues' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'issues' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'zones' }, () => fetchData())
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchData]);
 
   const vStats = (v:Venue) => {
     const vT = tasks.filter(t=>t.venueId===v.id);
@@ -193,7 +183,7 @@ export default function OverviewScreen() {
   const saveDetails = async () => {
     if (!editName||!editSuburb) {Alert.alert('Missing','Please fill all fields.');return;}
     setSavingDetails(true);
-    await updateDoc(doc(db,'venues',selVenue!.id),{name:editName,suburb:editSuburb});
+    await supabase.from('venues').update({name:editName, suburb:editSuburb}).eq('id', selVenue!.id);
     setSelVenue(p=>p?{...p,name:editName,suburb:editSuburb}:null);
     setSavingDetails(false);
     Alert.alert('✅','Venue updated!');
@@ -202,7 +192,9 @@ export default function OverviewScreen() {
   const addZone = async () => {
     if (!newZoneName) {Alert.alert('Missing','Enter zone name.');return;}
     setSavingZone(true);
-    await addDoc(collection(db,'zones'),{name:newZoneName,icon:newZoneIcon,status:'clean',score:100,venueId:selVenue!.id,createdAt:serverTimestamp()});
+    await supabase.from('zones').insert([{
+      name:newZoneName, icon:newZoneIcon, status:'clean', score:100, venueId:selVenue!.id
+    }]);
     setNewZoneName('');setNewZoneIcon('📍');setAddingZone(false);
     setSavingZone(false);
   };
@@ -210,7 +202,7 @@ export default function OverviewScreen() {
   const saveZone = async () => {
     if (!editZoneName) return;
     setSavingZone(true);
-    await updateDoc(doc(db,'zones',editZone!.id),{name:editZoneName,icon:editZoneIcon});
+    await supabase.from('zones').update({name:editZoneName, icon:editZoneIcon}).eq('id', editZone!.id);
     setEditZone(null);
     setSavingZone(false);
   };
@@ -218,7 +210,7 @@ export default function OverviewScreen() {
   const deleteZone = (z:Zone) => {
     Alert.alert('Delete Zone',`Delete "${z.name}"?`,[
       {text:'Cancel',style:'cancel'},
-      {text:'Delete',style:'destructive',onPress:async()=>await deleteDoc(doc(db,'zones',z.id))},
+      {text:'Delete',style:'destructive',onPress:async()=>await supabase.from('zones').delete().eq('id', z.id)},
     ]);
   };
 
@@ -247,7 +239,6 @@ export default function OverviewScreen() {
     ]);
   };
 
-  // ── INVITE — calls the inviteTeamMember Cloud Function. ──
   const inviteMember = async () => {
     if (!inviteName||!inviteEmail) {Alert.alert('Missing','Enter name and email.');return;}
     if (!selVenue) {Alert.alert('Missing','No venue selected.');return;}
@@ -257,41 +248,27 @@ export default function OverviewScreen() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: inviteEmail,
-          name: inviteName,
-          role: inviteRole,
-          venue: selVenue.name,
-          callerUid: user?.uid,
+          email: inviteEmail, name: inviteName, role: inviteRole,
+          venueName: selVenue.name, callerUid: user?.uid,
         }),
       });
       const result = await resp.json();
       if (!resp.ok) throw new Error(result.error || 'Failed to invite');
-
-      setInviteName(''); setInviteEmail(''); setInviteRole('cleaner');
-      Alert.alert(
-        'Done',
-        result.existed
-          ? `${inviteName} has been assigned to ${selVenue.name}.`
-          : `${inviteName} will receive an email with login details.`
-      );
+      setInviteName(''); setInviteEmail('');
+      Alert.alert('✅ Invite Sent', `An invitation has been sent to ${inviteEmail}.`);
       await fetchAllMembers(venues);
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to invite team member.');
+      Alert.alert('Error', err.message || 'Failed to send invite.');
     }
     setInviting(false);
   };
 
-  const myVenueIds  = venues.map(v=>v.id);
-  const allIssues   = issues.filter(i=>i.status!=='resolved'&&myVenueIds.includes(i.venueId)).length;
-  const allHigh     = issues.filter(i=>i.status!=='resolved'&&i.priority==='high'&&myVenueIds.includes(i.venueId)).length;
-  const avgScore    = venues.length?Math.round(venues.reduce((a,v)=>a+(v.score||0),0)/venues.length):0;
+  const filteredVenues = search
+    ? venues.filter(v=>v.name.toLowerCase().includes(search.toLowerCase())||v.suburb.toLowerCase().includes(search.toLowerCase()))
+    : venues;
 
-  const isOwnerOrManager = user?.role==='owner'||user?.role==='manager';
-
-  const filteredVenues = venues.filter(v=>
-    v.name.toLowerCase().includes(search.toLowerCase()) ||
-    v.suburb.toLowerCase().includes(search.toLowerCase())
-  );
+  const totalOpenIssues = issues.filter(i=>i.status!=='resolved').length;
+  const overallTaskPct = tasks.length ? Math.round((tasks.filter(t=>t.done).length/tasks.length)*100) : 0;
 
   if (loading) return (
     <SafeAreaView style={s.container}>
@@ -301,261 +278,185 @@ export default function OverviewScreen() {
 
   return (
     <SafeAreaView style={s.container}>
-      <ScrollView
-        contentContainerStyle={s.scroll}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor="#00c896"
-            colors={['#00c896']}
-          />
-        }
-      >
-
-        {/* Header with sites badge top right */}
+      <ScrollView contentContainerStyle={s.scroll} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#00c896"/>}>
         <View style={s.header}>
           <View>
-            <Text style={s.heading}>Venue Health</Text>
-            <Text style={s.sub}>
-              {user?.role==='manager' ? user?.venue : 'All venues overview'}
-            </Text>
+            <Text style={s.heading}>Overview</Text>
+            <Text style={s.sub}>{user?.role==='owner'?'Your managed properties':'Properties you manage'}</Text>
           </View>
-          {user?.role==='owner' && (
-            <View style={s.sitesBadge}>
-              <Text style={s.sitesBadgeNum}>{venues.length}</Text>
-              <Text style={s.sitesBadgeLabel}>Sites</Text>
-            </View>
-          )}
+          <View style={s.sitesBadge}>
+            <Text style={s.sitesBadgeNum}>{venues.length}</Text>
+            <Text style={s.sitesBadgeLabel}>SITES</Text>
+          </View>
         </View>
 
-        {/* Search */}
-        <View style={s.searchBar}>
-          <Ionicons name="search-outline" color="#6e7a8a" size={18}/>
-          <TextInput
-            style={s.searchInput}
-            placeholder="Search venues..."
-            placeholderTextColor="#6e7a8a"
-            value={search}
-            onChangeText={setSearch}
-          />
-          {search.length>0&&(
-            <TouchableOpacity onPress={()=>setSearch('')}>
-              <Ionicons name="close-circle" color="#6e7a8a" size={18}/>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* Summary bar */}
         <View style={s.summaryBar}>
-          {[
-            ['Avg Score', avgScore+'%',  '#00c896'],
-            ['Open Issues', ''+allIssues, allIssues>0?'#f24e6e':'#00c896'],
-            ['High Priority', ''+allHigh,  allHigh>0?'#f24e6e':'#00c896'],
-          ].map(([l,v,c],i)=>(
-            <React.Fragment key={l}>
-              {i>0&&<View style={s.divider}/>}
-              <View style={s.summaryItem}>
-                <Text style={[s.summaryVal,{color:c}]}>{v}</Text>
-                <Text style={s.summaryLabel}>{l}</Text>
-              </View>
-            </React.Fragment>
-          ))}
+          <View style={s.summaryItem}>
+            <Text style={[s.summaryVal,{color:'#00c896'}]}>{overallTaskPct}%</Text>
+            <Text style={s.summaryLabel}>Completion</Text>
+          </View>
+          <View style={s.divider}/>
+          <View style={s.summaryItem}>
+            <Text style={[s.summaryVal,{color:totalOpenIssues>0?'#f24e6e':'#eef0f4'}]}>{totalOpenIssues}</Text>
+            <Text style={s.summaryLabel}>Open Issues</Text>
+          </View>
+          <View style={s.divider}/>
+          <View style={s.summaryItem}>
+            <Text style={[s.summaryVal,{color:'#2c7ef7'}]}>{members.length}</Text>
+            <Text style={s.summaryLabel}>Team</Text>
+          </View>
         </View>
 
-        {/* Venue cards */}
-        {filteredVenues.map(v=>{
-          const st     = vStats(v);
-          const health = VENUE_HEALTH(v.score||0,st.issues);
-          const scoreColor = (v.score||0)>=85?'#00c896':(v.score||0)>=70?'#f5a623':'#f24e6e';
-          return (
-            <View key={v.id} style={[s.venueCard,{borderLeftColor:health.color}]}>
-              <View style={s.venueTop}>
-                <View style={s.venueLeft}>
-                  <Text style={s.venueName}>{v.name}</Text>
-                  <Text style={s.venueSuburb}>📍 {v.suburb}</Text>
-                </View>
-                <View style={[s.healthBadge,{backgroundColor:health.color+'22',borderColor:health.color+'44'}]}>
-                  <Text style={[s.healthText,{color:health.color}]}>{health.label}</Text>
-                </View>
-              </View>
+        <View style={s.searchBar}>
+          <Ionicons name="search" size={16} color="#6e7a8a"/>
+          <TextInput style={s.searchInput} placeholder="Search venues..." placeholderTextColor="#6e7a8a" value={search} onChangeText={setSearch}/>
+        </View>
 
-              <View style={s.metricsRow}>
-                {[
-                  [`${v.score||0}%`, 'Inspection', scoreColor],
-                  [`${st.issues}`,   'Open Issues', st.issues===0?'#00c896':st.highIssues>0?'#f24e6e':'#f5a623'],
-                  [`${members.filter(m=>m.venue===v.name||(m.venues&&m.venues.includes(v.name))).length}`, 'Staff', '#2c7ef7'],
-                ].map(([val,label,color])=>(
-                  <View key={label} style={s.metric}>
-                    <Text style={[s.metricVal,{color}]}>{val}</Text>
-                    <Text style={s.metricLabel}>{label}</Text>
-                  </View>
-                ))}
-              </View>
-
-              {st.highIssues>0&&(
-                <TouchableOpacity
-                  style={s.warningBanner}
-                  onPress={()=>navigation.navigate('Issues')}
-                >
-                  <Ionicons name="warning-outline" color="#f24e6e" size={14}/>
-                  <Text style={s.warningText}>
-                    {st.highIssues} high priority issue{st.highIssues>1?'s':''} — tap to view
-                  </Text>
-                  <Ionicons name="chevron-forward" color="#f24e6e" size={14}/>
-                </TouchableOpacity>
-              )}
-
-              {isOwnerOrManager&&(
-                <TouchableOpacity style={s.manageBtn} onPress={()=>openVenue(v)}>
-                  <Text style={s.manageBtnText}>Manage Venue →</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          );
-        })}
-
-        {venues.length===0&&(
+        {filteredVenues.length===0?(
           <View style={s.emptyWrap}>
-            <Text style={s.emptyText}>No venues yet</Text>
-            <Text style={s.emptySub}>Add venues from More menu</Text>
+            <Text style={s.emptyText}>No venues found</Text>
+            {user?.role==='owner'&&<Text style={s.emptySub}>Add a venue to get started</Text>}
           </View>
-        )}
+        ):(
+          filteredVenues.map(v=>{
+            const stats = vStats(v);
+            const health = VENUE_HEALTH(stats.pct, stats.issues);
+            return (
+              <View key={v.id} style={s.venueCard}>
+                <View style={s.venueTop}>
+                  <View style={s.venueLeft}>
+                    <Text style={s.venueName}>{v.name}</Text>
+                    <Text style={s.venueSuburb}>{v.suburb}</Text>
+                  </View>
+                  <View style={[s.healthBadge,{borderColor:health.color,backgroundColor:`${health.color}11`}]}>
+                    <Text style={[s.healthText,{color:health.color}]}>{health.label}</Text>
+                  </View>
+                </View>
 
+                {stats.highIssues>0&& (
+                  <View style={s.warningBanner}>
+                    <Ionicons name="warning" color="#f24e6e" size={14}/>
+                    <Text style={s.warningText}>{stats.highIssues} High Priority Issue{stats.highIssues>1?'s':''}</Text>
+                  </View>
+                )}
+
+                <View style={s.metricsRow}>
+                  <View style={s.metric}>
+                    <Text style={[s.metricVal,{color:'#00c896'}]}>{stats.pct}%</Text>
+                    <Text style={s.metricLabel}>Done</Text>
+                  </View>
+                  <View style={s.metric}>
+                    <Text style={[s.metricVal,{color:stats.issues>0?'#f5a623':'#eef0f4'}]}>{stats.issues}</Text>
+                    <Text style={s.metricLabel}>Issues</Text>
+                  </View>
+                  <View style={s.metric}>
+                    <Text style={[s.metricVal,{color:'#2c7ef7'}]}>{zones.filter(z=>z.venueId===v.id).length}</Text>
+                    <Text style={s.metricLabel}>Zones</Text>
+                  </View>
+                </View>
+
+                {(user?.role==='owner'||user?.role==='manager')&& (
+                  <TouchableOpacity style={s.manageBtn} onPress={()=>openVenue(v)}>
+                    <Text style={s.manageBtnText}>Manage Venue Settings</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            );
+          })
+        )}
       </ScrollView>
 
-      {/* Venue Management Modal */}
+      {/* Management Modal */}
       <Modal visible={!!selVenue} transparent animationType="slide">
         <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':'height'}>
           <View style={s.mgmtOverlay}>
             <View style={s.mgmtBox}>
-
-              <View style={s.mgmtHeader}>
-                <View style={{flex:1}}>
-                  <Text style={s.mgmtTitle}>{selVenue?.name}</Text>
-                  <Text style={s.mgmtSub}>📍 {selVenue?.suburb}</Text>
-                </View>
-                <TouchableOpacity onPress={()=>{setSelVenue(null);setEditZone(null);setAddingZone(false);}}>
-                  <Text style={s.mgmtClose}>✕</Text>
-                </TouchableOpacity>
-              </View>
-
-              <View style={s.tabRow}>
-                {(['details','zones','team'] as const).map(t=>(
-                  <TouchableOpacity key={t} style={[s.tab,activeTab===t&&s.tabActive]} onPress={()=>{setActiveTab(t);setEditZone(null);setAddingZone(false);}}>
-                    <Text style={[s.tabText,activeTab===t&&s.tabTextActive]}>
-                      {t==='details'?'Details':t==='zones'?'Zones':'Team'}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
               <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                <View style={s.mgmtHeader}>
+                  <View>
+                    <Text style={s.mgmtTitle}>{selVenue?.name}</Text>
+                    <Text style={s.mgmtSub}>Management Settings</Text>
+                  </View>
+                  <TouchableOpacity onPress={()=>setSelVenue(null)}>
+                    <Text style={s.mgmtClose}>✕</Text>
+                  </TouchableOpacity>
+                </View>
 
-                {/* DETAILS */}
+                <View style={s.tabRow}>
+                  {(['details','zones','team'] as const).map(t=>(
+                    <TouchableOpacity key={t} style={[s.tab, activeTab===t&&s.tabActive]} onPress={()=>setActiveTab(t)}>
+                      <Text style={[s.tabText, activeTab===t&&s.tabTextActive]}>
+                        {t==='details'?'Details':t==='zones'?'Zones':'Team'}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {/* DETAILS TAB */}
                 {activeTab==='details'&&(
                   <View style={s.tabContent}>
                     <Text style={s.fieldLabel}>VENUE NAME</Text>
-                    <TextInput style={s.input} value={editName} onChangeText={setEditName} placeholder="Venue name" placeholderTextColor="#6e7a8a"/>
-                    <Text style={s.fieldLabel}>SUBURB / LOCATION</Text>
-                    <TextInput style={s.input} value={editSuburb} onChangeText={setEditSuburb} placeholder="e.g. Toowoomba QLD" placeholderTextColor="#6e7a8a"/>
+                    <TextInput style={s.input} value={editName} onChangeText={setEditName}/>
+                    <Text style={s.fieldLabel}>SUBURB</Text>
+                    <TextInput style={s.input} value={editSuburb} onChangeText={setEditSuburb}/>
                     <TouchableOpacity style={s.saveBtn} onPress={saveDetails} disabled={savingDetails}>
                       {savingDetails?<ActivityIndicator color="#000"/>:<Text style={s.saveBtnText}>Save Changes</Text>}
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={{backgroundColor:'rgba(242,78,110,.1)',borderWidth:1,borderColor:'rgba(242,78,110,.3)',borderRadius:10,padding:13,alignItems:'center',marginTop:8}}
-                      onPress={()=>Alert.alert('Delete Venue',`Are you sure you want to delete ${selVenue?.name}? This cannot be undone.`,[
-                        {text:'Cancel',style:'cancel'},
-                        {text:'Delete',style:'destructive',onPress:async()=>{
-                          const venueId = selVenue!.id;
-                          const venueName = selVenue!.name;
-
-                          const issuesSnap = await getDocs(query(collection(db,'issues'),where('venueId','==',venueId)));
-                          await Promise.all(issuesSnap.docs.map((d: any) =>deleteDoc(doc(db,'issues',d.id))));
-
-                          const tasksSnap = await getDocs(query(collection(db,'tasks'),where('venueId','==',venueId)));
-                          await Promise.all(tasksSnap.docs.map((d: any) =>deleteDoc(doc(db,'tasks',d.id))));
-
-                          const zonesSnap = await getDocs(query(collection(db,'zones'),where('venueId','==',venueId)));
-                          await Promise.all(zonesSnap.docs.map((d: any) =>deleteDoc(doc(db,'zones',d.id))));
-
-                          const usersSnap = await getDocs(query(collection(db,'users'),where('venue','==',venueName)));
-                          await Promise.all(usersSnap.docs.map((d: any) =>updateDoc(doc(db,'users',d.id),{venue:''})));
-
-                          await deleteDoc(doc(db,'venues',venueId));
-
-                          // Sync venue count with Stripe
-                          const ownerId = selVenue?.ownerId || user?.uid;
-                          if (ownerId) {
-                            fetch(UPDATE_STRIPE_URL, {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ uid: ownerId }),
-                            }).catch(() => {}); // fire and forget
-                          }
-
-                          setSelVenue(null);
-                        }},
-                      ])}
-                    >
-                      <Text style={{color:'#f24e6e',fontWeight:'700',fontSize:14}}>Delete Venue</Text>
                     </TouchableOpacity>
                   </View>
                 )}
 
-                {/* ZONES */}
+                {/* ZONES TAB */}
                 {activeTab==='zones'&&(
                   <View style={s.tabContent}>
-                    {zones.filter(z=>z.venueId===selVenue?.id).map(z=>(
-                      <View key={z.id} style={s.zoneRow}>
+                    {zones.filter(z=>z.venueId===selVenue?.id).map((z,i,arr)=>(
+                      <View key={z.id} style={[s.zoneRow, i===arr.length-1&&{borderBottomWidth:0}]}>
+                        <Text style={s.zoneIcon}>{z.icon}</Text>
+                        <View style={s.zoneInfo}>
+                          <Text style={s.zoneName}>{z.name}</Text>
+                          <Text style={[s.zoneStatus,{color:ZONE_COLOR[z.status]||'#eef0f4'}]}>Score: {z.score}%</Text>
+                        </View>
                         {editZone?.id===z.id?(
-                          <View style={{flex:1,gap:6}}>
-                            <TextInput style={[s.input,{marginBottom:6}]} value={editZoneName} onChangeText={setEditZoneName}/>
-                            <View style={s.iconRow}>
-                              {ICONS.map(ic=>(
-                                <TouchableOpacity key={ic} style={[s.iconOpt,editZoneIcon===ic&&s.iconOptActive]} onPress={()=>setEditZoneIcon(ic)}>
-                                  <Text style={s.iconTxt}>{ic}</Text>
-                                </TouchableOpacity>
-                              ))}
-                            </View>
-                            <View style={s.twoBtn}>
-                              <TouchableOpacity style={s.cancelSmBtn} onPress={()=>setEditZone(null)}>
-                                <Text style={s.cancelSmText}>Cancel</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity style={s.saveSmBtn} onPress={saveZone} disabled={savingZone}>
-                                {savingZone?<ActivityIndicator color="#000" size="small"/>:<Text style={s.saveSmText}>Save</Text>}
-                              </TouchableOpacity>
-                            </View>
+                          <View style={s.twoBtn}>
+                            <TouchableOpacity style={s.cancelSmBtn} onPress={()=>setEditZone(null)}><Text style={s.cancelSmText}>Cancel</Text></TouchableOpacity>
+                            <TouchableOpacity style={s.saveSmBtn} onPress={saveZone} disabled={savingZone}>{savingZone?<ActivityIndicator size="small" color="#000"/>:<Text style={s.saveSmText}>Save</Text>}</TouchableOpacity>
                           </View>
                         ):(
-                          <>
-                            <Text style={s.zoneIcon}>{z.icon||'📍'}</Text>
-                            <View style={s.zoneInfo}>
-                              <Text style={s.zoneName}>{z.name}</Text>
-                              <Text style={[s.zoneStatus,{color:ZONE_COLOR[z.status]||'#6e7a8a'}]}>
-                                {z.status==='clean'?'Clean':z.status==='attention'?'Attention':z.status==='working'?'Working':'Issue'}
-                              </Text>
-                            </View>
-                            <TouchableOpacity style={s.editActionBtn} onPress={()=>{setEditZone(z);setEditZoneName(z.name);setEditZoneIcon(z.icon);}}>
+                          <View style={{flexDirection:'row',gap:6}}>
+                            <TouchableOpacity style={s.editActionBtn} onPress={()=>{setEditZone(z);setEditZoneName(z.name);setEditZoneIcon(z.icon);setAddingZone(false);}}>
                               <Text style={s.editActionTxt}>Edit</Text>
                             </TouchableOpacity>
                             <TouchableOpacity style={s.delActionBtn} onPress={()=>deleteZone(z)}>
-                              <Text style={s.delActionTxt}>Delete</Text>
+                              <Text style={s.delActionTxt}>Del</Text>
                             </TouchableOpacity>
-                          </>
+                          </View>
                         )}
                       </View>
                     ))}
 
-                    {zones.filter(z=>z.venueId===selVenue?.id).length===0&&(
-                      <Text style={s.emptyText2}>No zones yet</Text>
+                    {editZone&&(
+                      <View style={s.addZoneWrap}>
+                        <Text style={s.fieldLabel}>EDIT ZONE</Text>
+                        <TextInput style={s.input} value={editZoneName} onChangeText={setEditZoneName}/>
+                        <View style={s.iconRow}>
+                          {ICONS.map(ic=>(
+                            <TouchableOpacity key={ic} style={[s.iconOpt,editZoneIcon===ic&&s.iconOptActive]} onPress={()=>setEditZoneIcon(ic)}>
+                              <Text style={s.iconTxt}>{ic}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      </View>
                     )}
 
-                    {addingZone?(
+                    {!addingZone&&!editZone&&(
+                      <TouchableOpacity style={s.addZoneBtn} onPress={()=>setAddingZone(true)}>
+                        <Text style={s.addZoneBtnText}>＋ Add New Zone</Text>
+                      </TouchableOpacity>
+                    )}
+
+                    {addingZone&&(
                       <View style={s.addZoneWrap}>
-                        <Text style={s.fieldLabel}>ZONE NAME</Text>
-                        <TextInput style={s.input} value={newZoneName} onChangeText={setNewZoneName} placeholder="e.g. Function Room" placeholderTextColor="#6e7a8a"/>
+                        <Text style={s.fieldLabel}>NEW ZONE NAME</Text>
+                        <TextInput style={s.input} value={newZoneName} onChangeText={setNewZoneName} placeholder="e.g. Lobby"/>
                         <Text style={s.fieldLabel}>ICON</Text>
                         <View style={s.iconRow}>
                           {ICONS.map(ic=>(
@@ -565,164 +466,106 @@ export default function OverviewScreen() {
                           ))}
                         </View>
                         <View style={s.twoBtn}>
-                          <TouchableOpacity style={s.cancelSmBtn} onPress={()=>setAddingZone(false)}>
-                            <Text style={s.cancelSmText}>Cancel</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity style={s.saveSmBtn} onPress={addZone} disabled={savingZone}>
-                            {savingZone?<ActivityIndicator color="#000" size="small"/>:<Text style={s.saveSmText}>Add Zone</Text>}
-                          </TouchableOpacity>
+                          <TouchableOpacity style={s.cancelSmBtn} onPress={()=>setAddingZone(false)}><Text style={s.cancelSmText}>Cancel</Text></TouchableOpacity>
+                          <TouchableOpacity style={s.saveSmBtn} onPress={addZone} disabled={savingZone}>{savingZone?<ActivityIndicator size="small" color="#000"/>:<Text style={s.saveSmText}>Add Zone</Text>}</TouchableOpacity>
                         </View>
                       </View>
-                    ):(
-                      <TouchableOpacity style={s.addZoneBtn} onPress={()=>setAddingZone(true)}>
-                        <Text style={s.addZoneBtnText}>＋ Add Zone</Text>
-                      </TouchableOpacity>
                     )}
                   </View>
                 )}
 
-                {/* TEAM */}
+                {/* TEAM TAB */}
                 {activeTab==='team'&&(
-
                   <View style={s.tabContent}>
-                    {members.filter(m=>
-                      m.venue===selVenue?.name ||
-                      (m.venues && m.venues.includes(selVenue?.name||''))
-                    ).map((m,i,arr)=>{
-                      const cfg = ROLE_CONFIG[m.role]||ROLE_CONFIG.staff;
-                      return (
-                        <View key={m.id} style={[s.memberRow,i<arr.length-1&&s.memberBorder]}>
-                          <View style={[s.memberAv,{backgroundColor:cfg.color+'33'}]}>
-                            <Text style={[s.memberIni,{color:cfg.color}]}>
-                              {m.name?.split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
-                            </Text>
-                          </View>
-                          <View style={s.memberInfo}>
+                    {members.filter(m=>m.venues?.includes(selVenue?.name||'') || m.venue===selVenue?.name).length===0&&<Text style={s.emptyText2}>No team members assigned.</Text>}
+                    {members.filter(m=>m.venues?.includes(selVenue?.name||'') || m.venue===selVenue?.name).map((m,i,arr)=>(
+                      <View key={m.id} style={[s.memberRow, i!==arr.length-1&&s.memberBorder]}>
+                        <View style={[s.memberAv,{backgroundColor:(ROLE_CONFIG[m.role]?.color||'#6e7a8a')+'33'}]}>
+                          <Text style={[s.memberIni,{color:ROLE_CONFIG[m.role]?.color||'#eef0f4'}]}>{m.name.charAt(0).toUpperCase()}</Text>
+                        </View>
+                        <View style={s.memberInfo}>
+                          <View style={{flexDirection:'row',alignItems:'center',gap:6}}>
                             <Text style={s.memberName}>{m.name}</Text>
-                            <Text style={s.memberEmail}>{m.email}</Text>
-                            <View style={[s.roleBadge,{backgroundColor:cfg.color+'22',alignSelf:'flex-start',marginTop:3}]}>
-                              <Text style={[s.roleText,{color:cfg.color}]}>{cfg.label}</Text>
+                            <View style={[s.roleBadge,{backgroundColor:(ROLE_CONFIG[m.role]?.color||'#6e7a8a')+'22'}]}>
+                              <Text style={[s.roleText,{color:ROLE_CONFIG[m.role]?.color||'#eef0f4'}]}>{ROLE_CONFIG[m.role]?.label}</Text>
                             </View>
                           </View>
-                          {m.role!=='owner'&&(
-                            <TouchableOpacity style={s.removeBtn} onPress={()=>removeMember(m)}>
-                              <Text style={s.removeBtnText}>Remove</Text>
-                            </TouchableOpacity>
-                          )}
+                          <Text style={s.memberEmail}>{m.email}</Text>
                         </View>
-                      );
-                    })}
-
-                    {members.filter(m=>
-                      m.venue===selVenue?.name ||
-                      (m.venues && m.venues.includes(selVenue?.name||''))
-                    ).length===0&&(
-                      <Text style={s.emptyText2}>No staff assigned yet</Text>
-                    )}
+                        {m.email!==user?.email&&(
+                          <TouchableOpacity style={s.removeBtn} onPress={()=>removeMember(m)}>
+                            <Text style={s.removeBtnText}>Remove</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    ))}
 
                     <View style={s.inviteDivider}>
-                      <Text style={s.inviteTitle}>Add Team Member</Text>
+                      <Text style={s.inviteTitle}>Add to Venue</Text>
                     </View>
 
-                    <Text style={s.fieldLabel}>ROLE</Text>
-                    <View style={s.roleRow}>
-                      {INVITE_ROLES.map(r=>(
-                        <TouchableOpacity key={r.id} style={[s.roleOpt,inviteRole===r.id&&s.roleOptActive]} onPress={()=>setInviteRole(r.id)}>
-                          <Text style={[s.roleOptText,inviteRole===r.id&&s.roleOptTextActive]}>{r.label}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-
-                    {/* Search existing users — now scoped to fetched members,
-                        which are already limited to your accessible venues
-                        (no cross-tenant search). */}
-                    <Text style={s.fieldLabel}>SEARCH EXISTING MEMBERS</Text>
+                    <Text style={s.fieldLabel}>ASSIGN EXISTING TEAM MEMBER</Text>
                     <View style={s.searchBarInline}>
-                      <Text style={{fontSize:14,color:'#6e7a8a'}}>⌕</Text>
-                      <TextInput
-                        style={s.searchInputInline}
-                        placeholder="Search by name or email..."
+                      <Ionicons name="search" size={14} color="#6e7a8a" />
+                      <TextInput 
+                        style={s.searchInputInline} 
+                        placeholder="Search by name..." 
                         placeholderTextColor="#6e7a8a"
                         value={memberSearch}
                         onChangeText={setMemberSearch}
                       />
-                      {memberSearch.length>0&&(
-                        <TouchableOpacity onPress={()=>{setMemberSearch('');setSelectedMember(null);}}>
-                          <Text style={{color:'#6e7a8a',fontSize:16}}>✕</Text>
-                        </TouchableOpacity>
-                      )}
                     </View>
-
-                    {memberSearch.length>1&&(
+                    
+                    {memberSearch.length > 0 && (
                       <View style={s.searchResults}>
                         {members
-                          .filter(m=>
-                            m.venue!==selVenue?.name &&
-                            m.role!=='owner' &&
-                            (m.name?.toLowerCase().includes(memberSearch.toLowerCase()) ||
-                             m.email?.toLowerCase().includes(memberSearch.toLowerCase()))
-                          )
-                          .slice(0,5)
-                          .map(m=>{
-                            const cfg = ROLE_CONFIG[m.role]||ROLE_CONFIG.staff;
-                            const isSelected = selectedMember?.id===m.id;
-                            return (
-                              <TouchableOpacity key={m.id}
-                                style={[s.searchResultItem, isSelected&&s.searchResultItemActive]}
-                                onPress={()=>setSelectedMember(isSelected?null:m)}>
-                                <View style={[s.memberAv,{backgroundColor:cfg.color+'33',width:32,height:32,borderRadius:16}]}>
-                                  <Text style={[s.memberIni,{color:cfg.color,fontSize:11}]}>
-                                    {m.name?.split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
-                                  </Text>
-                                </View>
-                                <View style={{flex:1}}>
-                                  <Text style={{fontSize:13,fontWeight:'600',color:'#eef0f4'}}>{m.name}</Text>
-                                  <Text style={{fontSize:11,color:'#6e7a8a'}}>{m.email}</Text>
-                                  {m.venue&&<Text style={{fontSize:10,color:'#3a4252'}}>Currently at {m.venue}</Text>}
-                                </View>
-                                {isSelected&&<Text style={{color:'#00c896',fontSize:16}}>✓</Text>}
-                              </TouchableOpacity>
-                            );
-                          })
-                        }
-                        {members.filter(m=>
-                          m.venue!==selVenue?.name &&
-                          m.role!=='owner' &&
-                          (m.name?.toLowerCase().includes(memberSearch.toLowerCase()) ||
-                           m.email?.toLowerCase().includes(memberSearch.toLowerCase()))
-                        ).length===0&&(
-                          <Text style={{fontSize:12,color:'#6e7a8a',padding:12,textAlign:'center'}}>
-                            No existing members found — invite new below
-                          </Text>
-                        )}
+                          .filter(m => !(m.venues?.includes(selVenue?.name||'') || m.venue===selVenue?.name))
+                          .filter(m => m.name.toLowerCase().includes(memberSearch.toLowerCase()))
+                          .slice(0, 3)
+                          .map(m => (
+                            <TouchableOpacity 
+                              key={m.id} 
+                              style={[s.searchResultItem, selectedMember?.id === m.id && s.searchResultItemActive]}
+                              onPress={() => setSelectedMember(selectedMember?.id === m.id ? null : m)}
+                            >
+                              <View style={[s.memberAv, {width: 28, height: 28, backgroundColor:(ROLE_CONFIG[m.role]?.color||'#6e7a8a')+'33'}]}>
+                                <Text style={[s.memberIni, {fontSize: 10, color:ROLE_CONFIG[m.role]?.color||'#eef0f4'}]}>{m.name.charAt(0).toUpperCase()}</Text>
+                              </View>
+                              <View style={s.memberInfo}>
+                                <Text style={s.memberName}>{m.name}</Text>
+                                <Text style={s.memberEmail}>{ROLE_CONFIG[m.role]?.label}</Text>
+                              </View>
+                              {selectedMember?.id === m.id && <Ionicons name="checkmark-circle" color="#00c896" size={20} />}
+                            </TouchableOpacity>
+                        ))}
                       </View>
                     )}
 
-                    {/* Add selected member — uses inviteTeamMember Cloud
-                        Function so assignedUids stays in sync. */}
-                    {selectedMember&&(
-                      <TouchableOpacity style={s.saveBtn} onPress={async()=>{
+                    {selectedMember && (
+                      <TouchableOpacity style={s.saveBtn} onPress={async () => {
                         setSavingDetails(true);
                         try {
+                          const docId = selectedMember.uid || selectedMember.id;
                           const resp = await fetch(INVITE_URL, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                               email: selectedMember.email,
                               name: selectedMember.name,
-                              role: inviteRole,
-                              venue: selVenue!.name,
+                              role: selectedMember.role,
+                              venueName: selVenue?.name,
                               callerUid: user?.uid,
+                              existingUid: docId
                             }),
                           });
                           const result = await resp.json();
-                          if (!resp.ok) throw new Error(result.error || 'Failed');
+                          if (!resp.ok) throw new Error(result.error || 'Failed to assign');
                           setSelectedMember(null);
                           setMemberSearch('');
                           await fetchAllMembers(venues);
-                          Alert.alert('Done',`${selectedMember.name} added to ${selVenue!.name}`);
+                          Alert.alert('✅ Success', `${selectedMember.name} added to ${selVenue?.name}`);
                         } catch (err: any) {
-                          Alert.alert('Error', err.message || 'Failed to add member.');
+                          Alert.alert('Error', err.message || 'Failed to assign member.');
                         }
                         setSavingDetails(false);
                       }} disabled={savingDetails}>

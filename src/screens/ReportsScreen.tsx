@@ -1,11 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, FlatList,
   TouchableOpacity, ActivityIndicator, TextInput
 } from 'react-native';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -33,8 +31,6 @@ export default function ReportsScreen() {
   const [search,     setSearch]     = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  // Team members fetched via Cloud Function — see DashboardScreen for
-  // the full explanation of why this can't be a live Firestore listener.
   const fetchAllMembers = async (venueList: Venue[]) => {
     try {
       const results = await Promise.all(
@@ -54,54 +50,59 @@ export default function ReportsScreen() {
     }
   };
 
-  const onRefresh = async () => {
-    setRefreshing(true);
-    if (venues.length > 0) await fetchAllMembers(venues);
-    setTimeout(() => setRefreshing(false), 1000);
-  };
-
-  useEffect(() => {
+  const fetchData = useCallback(async () => {
     if (!user) return;
-
-    const venuesQuery = user.role === 'owner'
-      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
-      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
-
-    let unsubTasks: (() => void) | null = null;
-    let unsubIssues: (() => void) | null = null;
-
-    const u1 = safeOnSnapshot(venuesQuery, s => {
-      const venueList = s.docs.map((d: any) =>({id:d.id,...d.data()})) as Venue[];
-      setVenues(venueList);
-      setLoading(false);
-
-      const venueIds = venueList.map(v => v.id).slice(0, 30);
-
-      if (unsubTasks) unsubTasks();
-      if (unsubIssues) unsubIssues();
-
+    try {
+      let vList: Venue[] = [];
+      if (user.role === 'owner') {
+        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+        vList = (data || []) as Venue[];
+      } else {
+        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+        vList = (data || []) as Venue[];
+      }
+      
+      setVenues(vList);
+      
+      const venueIds = vList.map(v => v.id).slice(0, 30);
+      
       if (venueIds.length > 0) {
-        unsubTasks = safeOnSnapshot(
-          query(collection(db,'tasks'), where('venueId','in',venueIds)),
-          s2 => setTasks(s2.docs.map((d: any) =>({id:d.id,...d.data()})) as Task[])
-        );
-        unsubIssues = safeOnSnapshot(
-          query(collection(db,'issues'), where('venueId','in',venueIds)),
-          s3 => setIssues(s3.docs.map((d: any) =>({id:d.id,...d.data()})) as Issue[])
-        );
+        const [{data: tData}, {data: iData}] = await Promise.all([
+          supabase.from('tasks').select('*').in('venueId', venueIds),
+          supabase.from('issues').select('*').in('venueId', venueIds)
+        ]);
+        
+        setTasks((tData || []) as Task[]);
+        setIssues((iData || []) as Issue[]);
       } else {
         setTasks([]); setIssues([]);
       }
 
-      fetchAllMembers(venueList);
-    });
-
-    return () => {
-      u1();
-      if (unsubTasks) unsubTasks();
-      if (unsubIssues) unsubIssues();
-    };
+      await fetchAllMembers(vList);
+    } catch (err) {
+      console.log('Error fetching reports data:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
   }, [user]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchData();
+  };
+
+  useEffect(() => {
+    fetchData();
+
+    const channel = supabase.channel('reports_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'venues' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'issues' }, () => fetchData())
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchData]);
 
   const generatePDF = async (venue: Venue) => {
     setGenerating(venue.id);
@@ -196,7 +197,7 @@ export default function ReportsScreen() {
   <div>
     <div class="report-title">Weekly Performance Report</div>
     <div class="report-date">${weekStart.toLocaleDateString('en-AU')} — ${now.toLocaleDateString('en-AU')}</div>
-    <div class="report-date">Prepared by ${user?.name}</div>
+    <div class="report-date">Prepared by ${user?.displayName || user?.name || 'Admin'}</div>
   </div>
 </div>
 
@@ -328,17 +329,17 @@ export default function ReportsScreen() {
       </View>
 
       <FlatList
-  data={filteredVenues}
-  keyExtractor={item=>item.id}
-  contentContainerStyle={s.scroll}
-  refreshControl={
-    <RefreshControl
-      refreshing={refreshing}
-      onRefresh={onRefresh}
-      tintColor="#00c896"
-      colors={['#00c896']}
-    />
-  }
+        data={filteredVenues}
+        keyExtractor={item=>item.id}
+        contentContainerStyle={s.scroll}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor="#00c896"
+            colors={['#00c896']}
+          />
+        }
         ListHeaderComponent={
           <View style={s.infoCard}>
             <Ionicons name="document-text-outline" color="#2c7ef7" size={18}/>

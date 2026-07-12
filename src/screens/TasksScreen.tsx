@@ -1,15 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
   TouchableOpacity, Modal, TextInput, Alert,
   ActivityIndicator, KeyboardAvoidingView, Platform, FlatList
 } from 'react-native';
-import {
-  collection, onSnapshot, addDoc, updateDoc,
-  deleteDoc, doc, serverTimestamp, query, where
-} from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
 import { notifyTaskCreated } from '../config/notifications';
@@ -24,7 +19,7 @@ type Task = {
   icon: string; done: boolean; assignedTo: string; venueId: string;
 };
 
-type Venue = { id: string; name: string; ownerId?: string; };
+type Venue = { id: string; name: string; ownerId?: string; assignedUids?: string[]; };
 
 const PRIORITY_COLOR: Record<Priority, string> = {
   high:'#f24e6e', medium:'#f5a623', low:'#00c896',
@@ -63,11 +58,6 @@ export default function TasksScreen() {
   const isCleaner = user?.role === 'cleaner';
   const [refreshing, setRefreshing] = useState(false);
 
-  const onRefresh = async () => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1000);
-  };
-
   const [venues,      setVenues]     = useState<Venue[]>([]);
   const [tasks,       setTasks]      = useState<Task[]>([]);
   const [loading,     setLoading]    = useState(true);
@@ -84,46 +74,69 @@ export default function TasksScreen() {
   const [fPrio,    setFPrio]    = useState<Priority>('medium');
   const [fIcon,    setFIcon]    = useState('🧹');
 
-  // ── Scoped venues + tasks query ───────────────────────
-  useEffect(() => {
+  const fetchData = useCallback(async () => {
     if (!user) return;
+    try {
+      let venuesData: Venue[] = [];
+      if (user.role === 'owner') {
+        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+        venuesData = (data || []) as Venue[];
+      } else {
+        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+        venuesData = (data || []) as Venue[];
+      }
+      
+      setVenues(venuesData);
+      if (venuesData.length > 0 && !activeVenue) setActiveVenue(venuesData[0].id);
 
-    const venuesQuery = user.role === 'owner'
-      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
-      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
-
-    let unsubTasks: (() => void) | null = null;
-
-    const u1 = safeOnSnapshot(venuesQuery, snap => {
-      const filtered = snap.docs.map((d: any) =>({id:d.id,...d.data()})) as Venue[];
-      setVenues(filtered);
-      if (filtered.length > 0 && !activeVenue) setActiveVenue(filtered[0].id);
-
-      if (unsubTasks) unsubTasks();
-      const venueIds = filtered.map(v => v.id).slice(0, 30);
-      if (venueIds.length > 0) {
-        unsubTasks = safeOnSnapshot(
-          query(collection(db,'tasks'), where('venueId','in',venueIds)),
-          snap2 => {
-            setTasks(snap2.docs.map((d: any) =>({id:d.id,...d.data()})) as Task[]);
-            setLoading(false);
-          }
-        );
+      if (venuesData.length > 0) {
+        const venueIds = venuesData.map(v => v.id).slice(0, 30);
+        const { data: tasksData } = await supabase
+          .from('tasks')
+          .select('*')
+          .in('venueId', venueIds)
+          .order('created_at', { ascending: false });
+          
+        setTasks((tasksData || []) as Task[]);
       } else {
         setTasks([]);
-        setLoading(false);
       }
-    });
-    return () => { u1(); if (unsubTasks) unsubTasks(); };
-  }, [user]);
+    } catch (err) {
+      console.log('Error fetching tasks data:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [user, activeVenue]);
 
-  const completeTask   = (id:string) => updateDoc(doc(db,'tasks',id),{done:true});
-  const uncompleteTask = (id:string) => updateDoc(doc(db,'tasks',id),{done:false});
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchData();
+  };
+
+  useEffect(() => {
+    fetchData();
+
+    const channel = supabase.channel('tasks_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, () => fetchData())
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchData]);
+
+  const completeTask   = async (id:string) => {
+    await supabase.from('tasks').update({ done: true }).eq('id', id);
+  };
+  const uncompleteTask = async (id:string) => {
+    await supabase.from('tasks').update({ done: false }).eq('id', id);
+  };
 
   const deleteTask = (t:Task) => {
     Alert.alert('Delete Task',`Delete "${t.title}"?`,[
       {text:'Cancel',style:'cancel'},
-      {text:'Delete',style:'destructive',onPress:()=>deleteDoc(doc(db,'tasks',t.id))},
+      {text:'Delete',style:'destructive',onPress: async () => {
+        await supabase.from('tasks').delete().eq('id', t.id);
+      }},
     ]);
   };
 
@@ -142,15 +155,23 @@ export default function TasksScreen() {
     setSaving(true);
     try {
       if (editTask) {
-        await updateDoc(doc(db,'tasks',editTask.id),{title:fTitle,zone:fZone,frequency:fFreq,priority:fPrio,icon:fIcon});
+        await supabase.from('tasks').update({
+          title:fTitle, zone:fZone, frequency:fFreq, priority:fPrio, icon:fIcon
+        }).eq('id', editTask.id);
       } else {
-        await addDoc(collection(db,'tasks'),{title:fTitle,zone:fZone,frequency:fFreq,priority:fPrio,icon:fIcon,done:false,assignedTo:'all',venueId:activeVenue,createdAt:serverTimestamp()});
+        await supabase.from('tasks').insert([{
+          title:fTitle, zone:fZone, frequency:fFreq, priority:fPrio, icon:fIcon,
+          done:false, "assignedTo":null, venueId:activeVenue
+        }]);
       }
       setAddModal(false);
+      
+      if (!editTask) {
+        const taskTokens = await getVenueTokens(user?.uid||'', activeVenue);
+        await notifyTaskCreated(taskTokens, fTitle, currentVenue?.name||'', user?.displayName||user?.name||'');
+      }
     } catch(err:any){Alert.alert('Error',err.message);}
     setSaving(false);
-    const taskTokens = await getVenueTokens(user?.uid||'', activeVenue);
-    await notifyTaskCreated(taskTokens, fTitle, currentVenue?.name||'', user?.name||'');
   };
 
   const venueTasks = tasks.filter(t=>t.venueId===activeVenue);
@@ -235,50 +256,46 @@ export default function TasksScreen() {
       </View>
 
       <FlatList
-  data={shown}
-  keyExtractor={item=>item.id}
-  ListHeaderComponent={Header}
-  contentContainerStyle={s.list}
-  refreshControl={
-    <RefreshControl
-      refreshing={refreshing}
-      onRefresh={onRefresh}
-      tintColor="#00c896"
-      colors={['#00c896']}
-    />
-  }
+        data={shown}
+        keyExtractor={item=>item.id}
+        ListHeaderComponent={Header}
+        contentContainerStyle={s.list}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor="#00c896"
+            colors={['#00c896']}
+          />
+        }
         ListEmptyComponent={
           <View style={s.emptyWrap}>
             <Text style={s.emptyText}>No tasks here</Text>
-            {isManager&&<Text style={s.emptySub}>Tap Add Task to create one</Text>}
+            {isManager&&<Text style={s.emptySub}>Tap Add Task to create one.</Text>}
           </View>
         }
         renderItem={({item:t})=>{
-          const fc=FREQ_CONFIG[t.frequency]||FREQ_CONFIG.daily;
+          const isTaskManager = isManager || user?.role === 'owner';
+          const freqColor = FREQ_CONFIG[t.frequency].color;
           return (
-            <View style={[s.taskCard,{borderLeftColor:PRIORITY_COLOR[t.priority]},t.done&&s.taskDone]}>
-              <TouchableOpacity
-                style={[s.checkbox,t.done&&s.checkboxDone]}
-                onPress={()=>isCleaner?(t.done?uncompleteTask(t.id):completeTask(t.id)):undefined}
-                disabled={!isCleaner}>
-                {t.done&&<Ionicons name="checkmark" color="#000" size={12}/>}
+            <View style={[s.taskCard, t.done&&s.taskDone, {borderLeftColor:t.done?'#3a4252':freqColor}]}>
+              <TouchableOpacity style={[s.checkbox, t.done&&s.checkboxDone]} onPress={()=>t.done?uncompleteTask(t.id):completeTask(t.id)}>
+                {t.done&&<Ionicons name="checkmark" color="#000" size={14}/>}
               </TouchableOpacity>
               <View style={s.taskContent}>
                 <View style={s.taskTitleRow}>
                   <Text style={s.taskIcon}>{t.icon}</Text>
-                  <Text style={[s.taskTitle,t.done&&s.taskTitleDone]}>{t.title}</Text>
+                  <Text style={[s.taskTitle, t.done&&s.taskTitleDone]}>{t.title}</Text>
                 </View>
                 <View style={s.taskMeta}>
-                  <View style={[s.freqBadge,{backgroundColor:fc.color+'18'}]}>
-                    <Text style={[s.freqBadgeText,{color:fc.color}]}>{fc.label}</Text>
+                  <View style={[s.freqBadge,{backgroundColor:freqColor+'22'}]}>
+                    <Text style={[s.freqBadgeText,{color:freqColor}]}>{FREQ_CONFIG[t.frequency].label}</Text>
                   </View>
+                  {t.priority==='high'&&<View style={[s.prioBadge,{backgroundColor:PRIORITY_COLOR.high+'22'}]}><Text style={[s.prioBadgeText,{color:PRIORITY_COLOR.high}]}>HIGH</Text></View>}
                   <Text style={s.metaText}>📍 {t.zone}</Text>
-                  <View style={[s.prioBadge,{backgroundColor:PRIORITY_COLOR[t.priority]+'18'}]}>
-                    <Text style={[s.prioBadgeText,{color:PRIORITY_COLOR[t.priority]}]}>{t.priority}</Text>
-                  </View>
                 </View>
               </View>
-              {isManager&&(
+              {isTaskManager && (
                 <View style={s.taskActions}>
                   <TouchableOpacity style={s.editBtn} onPress={()=>openEdit(t)}>
                     <Ionicons name="pencil-outline" color="#2c7ef7" size={15}/>

@@ -1,31 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList,
   ScrollView, TouchableOpacity, Modal,
   TextInput, Alert, ActivityIndicator,
   KeyboardAvoidingView, Platform, Image, Dimensions
 } from 'react-native';
-import {
-  collection, onSnapshot, addDoc, updateDoc,
-  doc, query, where, serverTimestamp, orderBy
-} from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { notifyIssueRaised, notifyIssueResolved } from '../config/notifications';
 import { RefreshControl } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
+import { decode } from 'base64-arraybuffer';
+import * as FileSystem from 'expo-file-system';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
 
-// Fetch push tokens for all members of a venue via Cloud Function (Admin SDK,
-// bypasses Firestore rules). Returns empty array on any failure.
 async function getVenueTokens(callerUid: string, venueId: string): Promise<string[]> {
   try {
     const resp = await fetch(TEAM_URL, {
@@ -42,7 +35,6 @@ async function getVenueTokens(callerUid: string, venueId: string): Promise<strin
   }
 }
 
-
 type Priority = 'high' | 'medium' | 'low';
 type Status = 'open' | 'resolved';
 
@@ -55,7 +47,7 @@ type Issue = {
   resolvedAt?: any; resolvedNote?: string;
 };
 
-type Venue = { id: string; name: string; ownerId?: string; };
+type Venue = { id: string; name: string; ownerId?: string; assignedUids?: string[]; };
 
 const PRIORITY_COLOR: Record<Priority, string> = {
   high:'#f24e6e', medium:'#f5a623', low:'#00c896',
@@ -69,11 +61,6 @@ export default function IssuesScreen() {
   const canRaise   = user?.role === 'owner' || user?.role === 'manager' || user?.role === 'staff';
   const canResolve = user?.role === 'cleaner';
   const [refreshing, setRefreshing] = useState(false);
-
-  const onRefresh = async () => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1000);
-  };
 
   const [venues,        setVenues]        = useState<Venue[]>([]);
   const [issues,        setIssues]        = useState<Issue[]>([]);
@@ -99,52 +86,58 @@ export default function IssuesScreen() {
   const [viewerIndex,     setViewerIndex]     = useState(0);
   const [downloading,     setDownloading]     = useState(false);
 
-  // ── Scoped venues + issues query ──────────────────────
-  // Owners filter by ownerId; everyone else by their assigned venue
-  // name(s) — both match the Firestore security rules. Issues are then
-  // re-subscribed using where('venueId','in', accessibleVenueIds), which
-  // the rules can verify per-document (unlike an unfiltered scan).
-  useEffect(() => {
+  const fetchData = useCallback(async () => {
     if (!user) return;
-
-    const venuesQuery = user.role === 'owner'
-      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
-      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
-
-    let unsubIssues: (() => void) | null = null;
-
-    const unsubVenues = safeOnSnapshot(venuesQuery, snap => {
-      const v = snap.docs.map((d: any) => ({ id: d.id, ...d.data() })) as Venue[];
-      setVenues(v);
-      if (v.length > 0 && !newVenueId) setNewVenueId(v[0].id);
-
-      if (unsubIssues) unsubIssues();
-
-      const venueIds = v.map(x => x.id).slice(0, 30);
-      if (venueIds.length === 0) {
-        setIssues([]);
-        setLoading(false);
-        return;
+    try {
+      let venuesData: Venue[] = [];
+      if (user.role === 'owner') {
+        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+        venuesData = (data || []) as Venue[];
+      } else {
+        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+        venuesData = (data || []) as Venue[];
       }
+      
+      setVenues(venuesData);
+      if (venuesData.length > 0 && !newVenueId) setNewVenueId(venuesData[0].id);
 
-      const issuesQuery = venueIds.length === 1
-        ? query(collection(db,'issues'), where('venueId','==',venueIds[0]), orderBy('createdAt','desc'))
-        : query(collection(db,'issues'), where('venueId','in',venueIds), orderBy('createdAt','desc'));
+      if (venuesData.length > 0) {
+        const venueIds = venuesData.map(v => v.id).slice(0, 30);
+        const { data: issuesData } = await supabase
+          .from('issues')
+          .select('*')
+          .in('venueId', venueIds)
+          .order('createdAt', { ascending: false });
+          
+        setIssues((issuesData || []) as Issue[]);
+      } else {
+        setIssues([]);
+      }
+    } catch (err) {
+      console.log('Error fetching issues data:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [user, newVenueId]);
 
-      unsubIssues = safeOnSnapshot(issuesQuery, snap2 => {
-        setIssues(snap2.docs.map((d: any) =>({id:d.id,...d.data()})) as Issue[]);
-        setLoading(false);
-      });
-    });
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchData();
+  };
 
-    return () => {
-      unsubVenues();
-      if (unsubIssues) unsubIssues();
-    };
-  }, [user]);
+  useEffect(() => {
+    fetchData();
 
-  
-const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||venueId;
+    const channel = supabase.channel('issues_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'issues' }, () => fetchData())
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchData]);
+
+  const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||venueId;
+
   const addPhoto = async (photos: string[], setPhotos: (p:string[])=>void) => {
     if (photos.length >= 5) { Alert.alert('Maximum 5 photos allowed'); return; }
     Alert.alert('Add Photo','Choose an option',[
@@ -177,12 +170,28 @@ const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||v
     const urls: string[] = [];
     for (let i=0; i<uris.length; i++) {
       try {
-        const response = await fetch(uris[i]);
-        const blob = await response.blob();
-        const storageRef = ref(storage, `issues/${prefix}_${Date.now()}_${i}.jpg`);
-        await uploadBytes(storageRef, blob);
-        const url = await getDownloadURL(storageRef);
-        urls.push(url);
+        const uri = uris[i];
+        let fileData;
+        
+        if (Platform.OS === 'web') {
+          // For web
+          const response = await fetch(uri);
+          fileData = await response.blob();
+        } else {
+          // For mobile
+          const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+          fileData = decode(base64);
+        }
+        
+        const filePath = `${prefix}_${Date.now()}_${i}.jpg`;
+        const { data, error } = await supabase.storage.from('issues').upload(filePath, fileData, {
+          contentType: 'image/jpeg'
+        });
+        
+        if (error) throw error;
+        
+        const { data: publicUrlData } = supabase.storage.from('issues').getPublicUrl(filePath);
+        urls.push(publicUrlData.publicUrl);
       } catch(err) { console.log('Photo upload failed:', err); }
     }
     return urls;
@@ -198,20 +207,20 @@ const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||v
         photoUrls = await uploadPhotos(reportPhotos, 'report');
         setUploading(false);
       }
-      await addDoc(collection(db,'issues'), {
+      
+      const { error } = await supabase.from('issues').insert([{
         title:newTitle, zone:newZone, priority:newPriority,
-        status:'open', by:user?.name,
+        status:'open', by:user?.displayName || user?.name,
         venueId:newVenueId,
-        venueName:venues.find(v=>v.id===newVenueId)?.name||'',
-        photoUrls,
-        createdAt:serverTimestamp(),
-      });
+        photoUrls
+      }]);
+      
+      if (error) throw error;
+      
       setModal(false);
       setNewTitle(''); setNewZone(ZONES[0]); setNewPriority('medium'); setReportPhotos([]);
     } catch(err:any){ Alert.alert('Error',err.message); }
     setSaving(false);
-    const raiseTokens = await getVenueTokens(user?.uid||'', newVenueId);
-    await notifyIssueRaised(raiseTokens, newTitle, newPriority, newZone, venues.find(v=>v.id===newVenueId)?.name||'', user?.name||'');
   };
 
   const confirmResolve = async () => {
@@ -223,366 +232,332 @@ const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||v
         resolvedPhotoUrls = await uploadPhotos(resolvePhotos, 'resolved');
         setUploading(false);
       }
-      await updateDoc(doc(db,'issues',resolveIssueId), {
+      
+      const { error } = await supabase.from('issues').update({
         status:'resolved',
         resolvedPhotoUrls,
         resolvedNote: resolveNote,
-        resolvedBy:user?.name,
-        resolvedAt:serverTimestamp(),
-      });
+        resolvedBy: user?.displayName || user?.name,
+        resolvedAt: new Date().toISOString(),
+      }).eq('id', resolveIssueId);
+      
+      if (error) throw error;
+      
       setResolveModal(false);
       setResolvePhotos([]);
       setResolveNote('');
     } catch(err:any){ Alert.alert('Error',err.message); }
     setResolvingSaving(false);
-    const issue = issues.find(i=>i.id===resolveIssueId);
-if (issue) {
-  const resolveTokens = await getVenueTokens(user?.uid||'', issue.venueId);
-  await notifyIssueResolved(resolveTokens, issue.title, venues.find(v=>v.id===issue.venueId)?.name||'', user?.name||'');
-}
   };
 
-  const filteredByVenue = selectedVenue==='all' ? issues : issues.filter(i=>i.venueId===selectedVenue);
+  const filteredByVenue = selectedVenue === 'all'
+    ? issues
+    : issues.filter(i => i.venueId === selectedVenue);
 
-  const shown = filteredByVenue
-  .filter(i=>i.status===filter)
-  .filter(i=>
-    search.trim()==='' ||
-    getVenueName(i.venueId)?.toLowerCase().includes(search.toLowerCase())
-  );
+  const finalIssues = filteredByVenue
+    .filter(i => i.status === filter)
+    .filter(i => search === '' || i.title.toLowerCase().includes(search.toLowerCase()) || i.zone.toLowerCase().includes(search.toLowerCase()));
 
-  const openCount     = filteredByVenue.filter(i=>i.status==='open').length;
-  const resolvedCount = filteredByVenue.filter(i=>i.status==='resolved').length;
-
-  
-
-  const formatDate = (ts:any) => {
-    if (!ts?.toDate) return 'Just now';
-    return ts.toDate().toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});
+  const downloadImage = async () => {
+    if (Platform.OS === 'web') return;
+    setDownloading(true);
+    try {
+      const url = viewerPhotos[viewerIndex];
+      const uri = FileSystem.documentDirectory + `issue_${Date.now()}.jpg`;
+      await FileSystem.downloadAsync(url, uri);
+      await MediaLibrary.saveToLibraryAsync(uri);
+      Alert.alert('Saved', 'Photo saved to your library.');
+    } catch {
+      Alert.alert('Error', 'Failed to save photo.');
+    }
+    setDownloading(false);
   };
 
-  const PhotoStrip = ({urls, label, labelColor='#6e7a8a'}: {urls:string[];label:string;labelColor?:string}) => (
-    <View style={s.photoSection}>
-      <TouchableOpacity style={s.photoLabelRow} onPress={()=>{setViewerPhotos(urls);setViewerIndex(0);}}>
-        <Text style={[s.photoLabel,{color:labelColor}]}>{label}</Text>
-        <Ionicons name="chevron-forward" color={labelColor} size={12}/>
-      </TouchableOpacity>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.photoStrip}>
-        {urls.map((url,i)=>(
-          <TouchableOpacity key={i} onPress={()=>{setViewerPhotos(urls);setViewerIndex(i);}} style={s.photoThumbWrap}>
-            <Image source={{uri:url}} style={s.photoThumb} resizeMode="cover"/>
-            <View style={s.photoThumbOverlay}>
-              <Ionicons name="expand-outline" color="#fff" size={14}/>
-            </View>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
-    </View>
-  );
-
-  const PhotoPicker = ({photos, setPhotos}: {photos:string[]; setPhotos:(p:string[])=>void}) => (
+  const PhotoPicker = ({photos,setPhotos}:{photos:string[],setPhotos:(p:string[])=>void}) => (
     <View style={s.pickerWrap}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        {photos.map((uri,i)=>(
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+        {photos.map((p, i) => (
           <View key={i} style={s.pickerThumbWrap}>
-            <Image source={{uri}} style={s.pickerThumb} resizeMode="cover"/>
+            <Image source={{uri:p}} style={s.pickerThumb}/>
             <TouchableOpacity style={s.pickerRemove} onPress={()=>removePhoto(photos,setPhotos,i)}>
-              <Ionicons name="close-circle" color="#f24e6e" size={20}/>
+              <Ionicons name="close-circle" size={24} color="#f24e6e"/>
             </TouchableOpacity>
           </View>
         ))}
         {photos.length < 5 && (
           <TouchableOpacity style={s.pickerAdd} onPress={()=>addPhoto(photos,setPhotos)}>
-            <Ionicons name="camera-outline" color="#6e7a8a" size={24}/>
-            <Text style={s.pickerAddText}>{photos.length===0?'Add Photos':`${photos.length}/5`}</Text>
+            <Ionicons name="camera-outline" size={24} color="#6e7a8a"/>
+            <Text style={s.pickerAddText}>Add Photo</Text>
           </TouchableOpacity>
         )}
       </ScrollView>
-      {photos.length > 0 && (
-        <Text style={s.pickerCount}>{photos.length}/5 photo{photos.length>1?'s':''} selected</Text>
-      )}
+      <Text style={s.pickerCount}>{photos.length}/5 photos added</Text>
     </View>
   );
-
-  if (loading) return (
-    <SafeAreaView style={s.container}>
-      <ActivityIndicator color="#00c896" style={{marginTop:100}}/>
-    </SafeAreaView>
-  );
-
-  const Header = (
-  <View>
-    {/* Search above venue tabs */}
-    <View style={s.searchBar}>
-      <Ionicons name="search-outline" color="#6e7a8a" size={18}/>
-      <TextInput
-        style={s.searchInput}
-        placeholder="Search venues..."
-        placeholderTextColor="#6e7a8a"
-        value={search}
-        onChangeText={setSearch}
-      />
-      {search.length>0&&(
-        <TouchableOpacity onPress={()=>setSearch('')}>
-          <Ionicons name="close-circle" color="#6e7a8a" size={18}/>
-        </TouchableOpacity>
-      )}
-    </View>
-
-    {venues.length > 1 && (
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.venueTabsWrap} contentContainerStyle={s.venueTabs}>
-        <TouchableOpacity style={[s.venueTab,selectedVenue==='all'&&s.venueTabActive]} onPress={()=>setSelectedVenue('all')}>
-          <Text style={[s.venueTabText,selectedVenue==='all'&&s.venueTabTextActive]}>All</Text>
-        </TouchableOpacity>
-        {venues.map(v=>(
-          <TouchableOpacity key={v.id} style={[s.venueTab,selectedVenue===v.id&&s.venueTabActive]} onPress={()=>setSelectedVenue(v.id)}>
-            <Text style={[s.venueTabText,selectedVenue===v.id&&s.venueTabTextActive]}>{v.name}</Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
-    )}
-
-    <View style={s.toggleRow}>
-      <TouchableOpacity style={[s.toggleBtn,filter==='open'&&s.toggleBtnRed]} onPress={()=>{setFilter('open');setSearch('');}}>
-        <Text style={[s.toggleText,filter==='open'&&{color:'#f24e6e'}]}>🔴 Open ({openCount})</Text>
-      </TouchableOpacity>
-      <TouchableOpacity style={[s.toggleBtn,filter==='resolved'&&s.toggleBtnGreen]} onPress={()=>{setFilter('resolved');setSearch('');}}>
-        <Text style={[s.toggleText,filter==='resolved'&&{color:'#00c896'}]}>✅ Resolved ({resolvedCount})</Text>
-      </TouchableOpacity>
-    </View>
-
-    {canResolve && filter==='open' && (
-      <View style={s.notice}>
-        <Text style={s.noticeText}>📸 Add photo proof when marking resolved.</Text>
-      </View>
-    )}
-  </View>
-);
 
   return (
-    <SafeAreaView style={s.container}>
+    <SafeAreaView style={s.container} edges={['top']}>
+      {/* Header */}
       <View style={s.header}>
         <View>
           <Text style={s.heading}>Issues</Text>
-          <Text style={s.sub}>{venues.length > 1 ? (selectedVenue==='all' ? 'All venues' : venues.find(v=>v.id===selectedVenue)?.name||'') : venues[0]?.name||user?.venue||''}</Text>
+          <Text style={s.sub}>{issues.filter(i=>i.status==='open').length} Open</Text>
         </View>
         {canRaise && (
           <TouchableOpacity style={s.raiseBtn} onPress={()=>setModal(true)}>
-            <Ionicons name="add" color="#000" size={18}/>
-            <Text style={s.raiseBtnText}>Report</Text>
+            <Ionicons name="add-circle" size={18} color="#000"/>
+            <Text style={s.raiseBtnText}>Raise Issue</Text>
           </TouchableOpacity>
         )}
       </View>
 
+      {/* Toggles */}
+      <View style={s.toggleRow}>
+        <TouchableOpacity style={[s.toggleBtn, filter==='open'&&s.toggleBtnRed]} onPress={()=>setFilter('open')}>
+          <Text style={[s.toggleText, filter==='open'&&{color:'#f24e6e'}]}>Open</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[s.toggleBtn, filter==='resolved'&&s.toggleBtnGreen]} onPress={()=>setFilter('resolved')}>
+          <Text style={[s.toggleText, filter==='resolved'&&{color:'#00c896'}]}>Resolved</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Venues */}
+      {venues.length > 1 && (
+        <View style={s.venueTabsWrap}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.venueTabs}>
+            <TouchableOpacity style={[s.venueTab, selectedVenue==='all'&&s.venueTabActive]} onPress={()=>setSelectedVenue('all')}>
+              <Text style={[s.venueTabText, selectedVenue==='all'&&s.venueTabTextActive]}>All Venues</Text>
+            </TouchableOpacity>
+            {venues.map(v=>(
+              <TouchableOpacity key={v.id} style={[s.venueTab, selectedVenue===v.id&&s.venueTabActive]} onPress={()=>setSelectedVenue(v.id)}>
+                <Text style={[s.venueTabText, selectedVenue===v.id&&s.venueTabTextActive]}>{v.name}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* Search */}
+      <View style={{paddingHorizontal:24}}>
+        <View style={s.searchBar}>
+          <Ionicons name="search" size={16} color="#6e7a8a"/>
+          <TextInput
+            style={s.searchInput}
+            placeholder="Search issues..."
+            placeholderTextColor="#6e7a8a"
+            value={search}
+            onChangeText={setSearch}
+          />
+        </View>
+      </View>
+
+      {!isOwnerOrManager && filter === 'open' && (
+        <View style={s.notice}>
+          <Text style={s.noticeText}>💡 Open issues are reported to management to assign to cleaners or trades.</Text>
+        </View>
+      )}
+
       <FlatList
-  data={shown}
-  keyExtractor={item=>item.id}
-  ListHeaderComponent={Header}
-  contentContainerStyle={s.list}
-  refreshControl={
-    <RefreshControl
-      refreshing={refreshing}
-      onRefresh={onRefresh}
-      tintColor="#00c896"
-      colors={['#00c896']}
-    />
-  }
+        data={finalIssues}
+        keyExtractor={i=>i.id}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#00c896" />}
+        contentContainerStyle={s.list}
         ListEmptyComponent={
+          loading ? <ActivityIndicator color="#00c896" style={{marginTop:40}}/> :
           <View style={s.emptyWrap}>
-            <Ionicons name={filter==='open'?'checkmark-circle-outline':'time-outline'} color="#3a4252" size={48}/>
-            <Text style={s.emptyText}>
-              {search ? `No results for "${search}"` : filter==='open' ? 'No open issues 🎉' : 'No resolved issues yet'}
-            </Text>
+            <Ionicons name="checkmark-circle-outline" size={48} color="#00c896"/>
+            <Text style={s.emptyText}>No {filter} issues found</Text>
           </View>
         }
-        renderItem={({item:issue})=>(
-          <View style={[s.issueCard,{borderLeftColor:PRIORITY_COLOR[issue.priority]},filter==='resolved'&&s.issueResolved]}>
-            <View style={s.issueTop}>
-              <View style={[s.priorityBadge,{backgroundColor:PRIORITY_COLOR[issue.priority]+'22'}]}>
-                <Text style={[s.priorityText,{color:PRIORITY_COLOR[issue.priority]}]}>{issue.priority.toUpperCase()}</Text>
-              </View>
-              {filter==='resolved'&&(
-                <View style={s.resolvedBadge}>
-                  <Ionicons name="checkmark-circle" color="#00c896" size={12}/>
-                  <Text style={s.resolvedBadgeText}>Resolved</Text>
-                </View>
-              )}
-              {isOwnerOrManager && issue.venueId && (
-                <Text style={s.issueVenueTag}>🏢 {getVenueName(issue.venueId)}</Text>
-              )}
-              <Text style={s.issueDate}>{formatDate(issue.createdAt)}</Text>
-            </View>
-
-            <Text style={s.issueTitle}>{issue.title}</Text>
-            <View style={{flexDirection:'row',alignItems:'center',gap:4}}>
-              <Ionicons name="location-outline" color="#6e7a8a" size={12}/>
-              <Text style={s.issueMeta}>{issue.zone} · {issue.by}</Text>
-            </View>
-
-            {issue.photoUrls && issue.photoUrls.length > 0 && (
-              <PhotoStrip urls={issue.photoUrls} label={`📷 ${issue.photoUrls.length} photo${issue.photoUrls.length>1?'s':''}`}/>
-            )}
-
-            {filter==='resolved' && (issue.resolvedNote || (issue.resolvedPhotoUrls && issue.resolvedPhotoUrls.length > 0)) && (
-              <View style={s.resolvedSection}>
-                <View style={s.resolvedSectionHeader}>
-                  <Ionicons name="checkmark-circle" color="#00c896" size={14}/>
-                  <Text style={s.resolvedSectionTitle}>Resolved by {issue.resolvedBy}</Text>
-                </View>
-                {!!issue.resolvedNote && (
-                  <View style={s.resolveNoteWrap}>
-                    <Ionicons name="chatbubble-ellipses-outline" color="#00c896" size={12}/>
-                    <Text style={s.resolveNote}>{issue.resolvedNote}</Text>
+        renderItem={({item}) => {
+          let dateStr = 'Just now';
+          if (item.createdAt) {
+            const date = new Date(item.createdAt);
+            dateStr = date.toLocaleDateString('en-AU',{month:'short',day:'numeric'}) + ' ' + date.toLocaleTimeString('en-AU',{hour:'numeric',minute:'2-digit'});
+          }
+          
+          return (
+            <View style={[s.issueCard, item.status==='resolved'&&s.issueResolved]}>
+              <View style={s.issueTop}>
+                {item.status==='open' ? (
+                  <View style={[s.priorityBadge,{backgroundColor:`${PRIORITY_COLOR[item.priority]}22`}]}>
+                    <Text style={[s.priorityText,{color:PRIORITY_COLOR[item.priority]}]}>{item.priority.toUpperCase()}</Text>
+                  </View>
+                ) : (
+                  <View style={s.resolvedBadge}>
+                    <Ionicons name="checkmark" size={12} color="#00c896"/>
+                    <Text style={s.resolvedBadgeText}>RESOLVED</Text>
                   </View>
                 )}
-                {issue.resolvedPhotoUrls && issue.resolvedPhotoUrls.length > 0 && (
-                  <PhotoStrip
-                    urls={issue.resolvedPhotoUrls}
-                    label={`${issue.resolvedPhotoUrls.length} proof photo${issue.resolvedPhotoUrls.length>1?'s':''}`}
-                    labelColor="#00c896"
-                  />
-                )}
+                {venues.length > 1 && <Text style={s.issueVenueTag}>🏢 {getVenueName(item.venueId)}</Text>}
+                <Text style={s.issueDate}>{dateStr}</Text>
               </View>
-            )}
 
-            {filter==='open' && canResolve && (
-              <TouchableOpacity style={s.resolveBtn} onPress={()=>{setResolveIssueId(issue.id);setResolvePhotos([]);setResolveNote('');setResolveModal(true);}}>
-                <Ionicons name="checkmark-circle-outline" color="#00c896" size={16}/>
-                <Text style={s.resolveBtnText}>Mark Resolved</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        )}
+              <Text style={s.issueTitle}>{item.title}</Text>
+              <View style={s.issueMeta}>
+                <Ionicons name="location-outline" size={12} color="#6e7a8a"/>
+                <Text style={{fontSize:12,color:'#6e7a8a',marginLeft:4}}>
+                  {item.zone}  ·  Reported by {item.by}
+                </Text>
+              </View>
+
+              {item.photoUrls && item.photoUrls.length > 0 && (
+                <View style={s.photoSection}>
+                  <View style={s.photoLabelRow}>
+                    <Ionicons name="camera-outline" size={12} color="#6e7a8a"/>
+                    <Text style={[s.photoLabel,{color:'#6e7a8a'}]}>Issue Photos</Text>
+                  </View>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.photoStrip}>
+                    {item.photoUrls.map((url, idx) => (
+                      <TouchableOpacity key={idx} style={s.photoThumbWrap} onPress={()=>{setViewerPhotos(item.photoUrls||[]);setViewerIndex(idx);}}>
+                        <Image source={{uri:url}} style={s.photoThumb}/>
+                        <View style={s.photoThumbOverlay}><Ionicons name="expand" size={12} color="#fff"/></View>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
+
+              {item.status==='resolved' && (
+                <View style={s.resolvedSection}>
+                  <View style={s.resolvedSectionHeader}>
+                    <Ionicons name="build" size={14} color="#00c896"/>
+                    <Text style={s.resolvedSectionTitle}>Resolution Details</Text>
+                  </View>
+                  {!!item.resolvedNote && (
+                    <View style={s.resolveNoteWrap}>
+                      <Text style={s.resolveNote}>"{item.resolvedNote}"</Text>
+                    </View>
+                  )}
+                  {item.resolvedPhotoUrls && item.resolvedPhotoUrls.length > 0 && (
+                    <View style={s.photoSection}>
+                      <View style={s.photoLabelRow}>
+                        <Ionicons name="camera-outline" size={12} color="#00c896"/>
+                        <Text style={[s.photoLabel,{color:'#00c896'}]}>Proof Photos</Text>
+                      </View>
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.photoStrip}>
+                        {item.resolvedPhotoUrls.map((url, idx) => (
+                          <TouchableOpacity key={idx} style={s.photoThumbWrap} onPress={()=>{setViewerPhotos(item.resolvedPhotoUrls||[]);setViewerIndex(idx);}}>
+                            <Image source={{uri:url}} style={s.photoThumb}/>
+                            <View style={s.photoThumbOverlay}><Ionicons name="expand" size={12} color="#fff"/></View>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                    </View>
+                  )}
+                  <Text style={{fontSize:10,color:'#6e7a8a',marginTop:4}}>Resolved by {item.resolvedBy}</Text>
+                </View>
+              )}
+
+              {canResolve && item.status==='open' && (
+                <TouchableOpacity style={s.resolveBtn} onPress={()=>{setResolveIssueId(item.id);setResolveModal(true);}}>
+                  <Ionicons name="checkmark-circle-outline" size={16} color="#00c896"/>
+                  <Text style={s.resolveBtnText}>Mark Resolved</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          );
+        }}
       />
 
-      {/* Full Screen Photo Viewer — swipeable + download */}
       <Modal visible={viewerPhotos.length > 0} transparent animationType="fade">
         <View style={s.viewerOverlay}>
-          {/* Close */}
           <TouchableOpacity style={s.viewerClose} onPress={()=>setViewerPhotos([])}>
-            <Ionicons name="close" color="#fff" size={26}/>
+            <Ionicons name="close" size={28} color="#fff"/>
           </TouchableOpacity>
-          {/* Counter */}
           {viewerPhotos.length > 1 && (
             <View style={s.viewerCounter}>
               <Text style={s.viewerCounterText}>{viewerIndex+1} / {viewerPhotos.length}</Text>
             </View>
           )}
-          {/* Swipeable images */}
-          <FlatList
-            data={viewerPhotos}
-            keyExtractor={(_,i)=>String(i)}
-            horizontal
-            pagingEnabled
-            showsHorizontalScrollIndicator={false}
-            initialScrollIndex={viewerIndex}
-            getItemLayout={(_,i)=>({length:SCREEN_WIDTH,offset:SCREEN_WIDTH*i,index:i})}
-            onMomentumScrollEnd={e=>{
-              const idx = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
-              setViewerIndex(idx);
-            }}
-            renderItem={({item:url})=>(
-              <View style={{width:SCREEN_WIDTH,justifyContent:'center',alignItems:'center'}}>
-                <Image source={{uri:url}} style={s.viewerImage} resizeMode="contain"/>
-              </View>
-            )}
-          />
-          {/* Download */}
-          <TouchableOpacity
-            style={s.viewerDownload}
-            disabled={downloading}
-            onPress={async ()=>{
-              const url = viewerPhotos[viewerIndex];
-              if (!url) return;
-              setDownloading(true);
-              try {
-                const { status } = await MediaLibrary.requestPermissionsAsync();
-                if (status !== 'granted') {
-                  Alert.alert('Permission required','Please allow photo library access to save images.');
-                  setDownloading(false);
-                  return;
-                }
-                const asset = await MediaLibrary.createAssetAsync(url);
-                await MediaLibrary.createAlbumAsync('Venues V', asset, false);
-                Alert.alert('Saved!','Photo saved to your camera roll.');
-              } catch(err:any) {
-                Alert.alert('Download failed', err.message || 'Could not save photo.');
-              }
-              setDownloading(false);
+          <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false}
+            onMomentumScrollEnd={(e) => {
+              const i = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
+              setViewerIndex(i);
             }}
           >
-            {downloading
-              ? <ActivityIndicator color="#fff" size="small"/>
-              : <><Ionicons name="download-outline" color="#fff" size={22}/>
-                 <Text style={s.viewerDownloadText}>Save Photo</Text></>
-            }
-          </TouchableOpacity>
+            {viewerPhotos.map((url, idx) => (
+              <View key={idx} style={{width:SCREEN_WIDTH,justifyContent:'center',alignItems:'center'}}>
+                <Image source={{uri:url}} style={s.viewerImage} resizeMode="contain"/>
+              </View>
+            ))}
+          </ScrollView>
+          {Platform.OS !== 'web' && (
+            <TouchableOpacity style={s.viewerDownload} onPress={downloadImage} disabled={downloading}>
+              <Ionicons name="download-outline" size={20} color="#fff"/>
+              <Text style={s.viewerDownloadText}>{downloading?'Saving...':'Save to Library'}</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </Modal>
 
-      {/* Report Modal */}
       <Modal visible={modalOpen} transparent animationType="slide">
         <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':'height'}>
           <View style={s.modalOverlay}>
             <View style={s.modalBox}>
               <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
                 <View style={s.modalHeader}>
-                  <Text style={s.modalTitle}>📸 Report Issue</Text>
-                  <TouchableOpacity onPress={()=>{setModal(false);setReportPhotos([]);}}>
+                  <Text style={s.modalTitle}>Raise an Issue</Text>
+                  <TouchableOpacity onPress={()=>setModal(false)}>
                     <Text style={s.modalClose}>✕</Text>
                   </TouchableOpacity>
                 </View>
 
                 {venues.length > 1 && (
-                  <>
-                    <Text style={s.inputLabel}>VENUE</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{marginBottom:14}}>
-                      {venues.map(v=>(
-                        <TouchableOpacity key={v.id} style={[s.chip,newVenueId===v.id&&s.chipActive]} onPress={()=>setNewVenueId(v.id)}>
-                          <Text style={[s.chipText,newVenueId===v.id&&s.chipTextActive]}>{v.name}</Text>
+                  <View style={{marginBottom:14}}>
+                    <Text style={s.inputLabel}>SELECT VENUE</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                      {venues.map(v => (
+                        <TouchableOpacity key={v.id} style={[s.chip, newVenueId===v.id&&s.chipActive]} onPress={()=>setNewVenueId(v.id)}>
+                          <Text style={[s.chipText, newVenueId===v.id&&s.chipTextActive]}>{v.name}</Text>
                         </TouchableOpacity>
                       ))}
                     </ScrollView>
-                  </>
+                  </View>
                 )}
 
-                <Text style={s.inputLabel}>PRIORITY</Text>
-                <View style={s.threeRow}>
-                  {(['high','medium','low'] as Priority[]).map(p=>(
-                    <TouchableOpacity key={p} style={[s.priorityOption,newPriority===p&&{borderColor:PRIORITY_COLOR[p],backgroundColor:PRIORITY_COLOR[p]+'18'}]} onPress={()=>setNewPriority(p)}>
-                      <Text style={[s.priorityOptionText,newPriority===p&&{color:PRIORITY_COLOR[p]}]}>
-                        {p==='high'?'🔴':p==='medium'?'🟡':'🟢'} {p.charAt(0).toUpperCase()+p.slice(1)}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
+                <Text style={s.inputLabel}>ISSUE DESCRIPTION</Text>
+                <TextInput
+                  style={s.input}
+                  placeholder="What's wrong? (e.g. Broken tap, spilled glass)"
+                  placeholderTextColor="#6e7a8a"
+                  value={newTitle}
+                  onChangeText={setNewTitle}
+                  multiline
+                />
 
-                <Text style={s.inputLabel}>ZONE</Text>
+                <Text style={s.inputLabel}>ZONE / LOCATION</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{marginBottom:14}}>
-                  {ZONES.map(z=>(
-                    <TouchableOpacity key={z} style={[s.chip,newZone===z&&s.chipActive]} onPress={()=>setNewZone(z)}>
-                      <Text style={[s.chipText,newZone===z&&s.chipTextActive]}>{z}</Text>
+                  {ZONES.map(z => (
+                    <TouchableOpacity key={z} style={[s.chip, newZone===z&&s.chipActive]} onPress={()=>setNewZone(z)}>
+                      <Text style={[s.chipText, newZone===z&&s.chipTextActive]}>{z}</Text>
                     </TouchableOpacity>
                   ))}
                 </ScrollView>
 
-                <Text style={s.inputLabel}>DESCRIPTION</Text>
-                <TextInput style={s.input} placeholder="Describe the issue..." placeholderTextColor="#6e7a8a" value={newTitle} onChangeText={setNewTitle} multiline numberOfLines={3}/>
+                <Text style={s.inputLabel}>PRIORITY</Text>
+                <View style={s.threeRow}>
+                  {(['low','medium','high'] as Priority[]).map(p => (
+                    <TouchableOpacity key={p} style={[s.priorityOption, newPriority===p&&{borderColor:PRIORITY_COLOR[p],backgroundColor:`${PRIORITY_COLOR[p]}11`}]} onPress={()=>setNewPriority(p)}>
+                      <Text style={[s.priorityOptionText, newPriority===p&&{color:PRIORITY_COLOR[p],fontWeight:'700'}]}>{p.toUpperCase()}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
 
-                <Text style={s.inputLabel}>PHOTOS (UP TO 5)</Text>
+                <Text style={s.inputLabel}>PHOTOS (OPTIONAL, UP TO 5)</Text>
                 <PhotoPicker photos={reportPhotos} setPhotos={setReportPhotos}/>
 
                 <View style={s.twoBtn}>
-                  <TouchableOpacity style={s.cancelBtn} onPress={()=>{setModal(false);setReportPhotos([]);}}>
+                  <TouchableOpacity style={s.cancelBtn} onPress={()=>setModal(false)}>
                     <Text style={s.cancelBtnText}>Cancel</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={s.submitBtn} onPress={raiseIssue} disabled={saving||uploading}>
                     {saving||uploading
-                      ?<View style={{flexDirection:'row',alignItems:'center',gap:6}}>
+                      ? <View style={{flexDirection:'row',alignItems:'center',gap:6}}>
                           <ActivityIndicator color="#000" size="small"/>
                           <Text style={s.submitBtnText}>{uploading?'Uploading...':'Saving...'}</Text>
                         </View>
-                      :<Text style={s.submitBtnText}>Submit</Text>
+                      : <Text style={s.submitBtnText}>Submit Issue</Text>
                     }
                   </TouchableOpacity>
                 </View>
@@ -593,7 +568,6 @@ if (issue) {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Resolve Modal */}
       <Modal visible={resolveModal} transparent animationType="slide">
         <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':'height'}>
           <View style={s.modalOverlay}>

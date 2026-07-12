@@ -1,10 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import {
-  collection, onSnapshot, query, orderBy, limit, where,
-  doc, getDoc, setDoc, serverTimestamp
-} from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { safeOnSnapshot } from '../config/firestoreHelpers';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { supabase } from '../config/supabase';
 import { useAuth } from './AuthContext';
 
 const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
@@ -31,19 +26,17 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
   const [roomUnreads, setRoomUnreads] = useState<Record<string, RoomUnread>>({});
   const [lastRead,    setLastRead]    = useState<Record<string, Date | null>>({});
 
-  const getRoomIds = (venues: any[], members: any[]): string[] => {
+  const [venues, setVenues] = useState<any[]>([]);
+  const [members, setMembers] = useState<any[]>([]);
+
+  const getRoomIds = (vList: any[], mList: any[]): string[] => {
     if (!user) return [];
 
-    const getDmId = (memberUid: string) => {
-      const ids = [user.uid, memberUid].sort();
-      return `dm_${ids[0]}_${ids[1]}`;
+    const getDmId = (memberName: string) => {
+      const names = [user?.name||user?.displayName||'', memberName].sort();
+      return `dm_${names[0].replace(/\s/g,'_')}_${names[1].replace(/\s/g,'_')}`;
     };
 
-    // DM matrix — who each role can message:
-    // owner   → managers only
-    // manager → owners, staff, cleaners
-    // cleaner → managers, staff
-    // staff   → managers, cleaners
     const dmAllowed: Record<string, string[]> = {
       owner:   ['manager'],
       manager: ['owner', 'staff', 'cleaner'],
@@ -52,12 +45,14 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
     };
     const allowedRoles = dmAllowed[user.role] || [];
 
-    let roomIds: string[] = [...venues.map((v: any) => v.id)];
+    let roomIds: string[] = [...vList.map((v: any) => v.id)];
 
-    const dmPartners = members.filter((m: any) =>
-      m.name !== user.name && allowedRoles.includes(m.role)
+    const userName = user?.displayName || user?.name || '';
+
+    const dmPartners = mList.filter((m: any) =>
+      m.name !== userName && allowedRoles.includes(m.role)
     );
-    dmPartners.forEach((m: any) => roomIds.push(getDmId(m.uid || m.id)));
+    dmPartners.forEach((m: any) => roomIds.push(getDmId(m.name)));
 
     return [...new Set(roomIds)];
   };
@@ -65,11 +60,14 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
   const markRoomRead = async (roomId: string) => {
     if (!user?.uid) return;
     const key = `${user.uid}_${roomId}`;
-    await setDoc(doc(db, 'readReceipts', key), {
+    
+    await supabase.from('read_receipts').upsert({
+      id: key,
       userId: user.uid,
       roomId,
-      readAt: serverTimestamp(),
+      readAt: new Date().toISOString()
     });
+    
     setLastRead(prev => ({ ...prev, [roomId]: new Date() }));
     setRoomUnreads(prev => ({
       ...prev,
@@ -77,10 +75,6 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
     }));
   };
 
-  // Team members fetched via Cloud Function instead of a live Firestore
-  // listener — see DashboardScreen for the full explanation. This means
-  // the chat room list (DMs available) refreshes on venue list changes,
-  // not instantly when a new team member is added elsewhere.
   const fetchMembers = async (venueList: any[]): Promise<any[]> => {
     try {
       const results = await Promise.all(
@@ -99,84 +93,107 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const fetchVenuesAndMembers = useCallback(async () => {
+    if (!user) return;
+    try {
+      let vList: any[] = [];
+      if (user.role === 'owner') {
+        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+        vList = data || [];
+      } else {
+        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+        vList = data || [];
+      }
+      
+      setVenues(vList);
+      const mList = await fetchMembers(vList);
+      setMembers(mList);
+    } catch (err) {
+      console.log('UnreadContext fetch error', err);
+    }
+  }, [user]);
+
   useEffect(() => {
+    fetchVenuesAndMembers();
+    
+    if (!user) return;
+    const channel = supabase.channel('unread_venues_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'venues' }, fetchVenuesAndMembers)
+      .subscribe();
+      
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchVenuesAndMembers, user]);
+
+  const updateUnreadData = useCallback(async () => {
     if (!user?.uid) return;
-
-    let venues:  any[] = [];
-    let members: any[] = [];
-    let roomUnsubs: (() => void)[] = [];
-
-    const subscribeToRooms = () => {
-      roomUnsubs.forEach(u => u());
-      roomUnsubs = [];
-
-      const roomIds = getRoomIds(venues, members);
-      if (roomIds.length === 0) return;
-
-      roomIds.forEach(async roomId => {
-        const key = `${user.uid}_${roomId}`;
-        try {
-          const snap = await getDoc(doc(db, 'readReceipts', key));
-          if (snap.exists()) {
-            const readAt = snap.data().readAt?.toDate?.() || null;
-            setLastRead(prev => ({ ...prev, [roomId]: readAt }));
-          }
-        } catch {}
+    
+    const roomIds = getRoomIds(venues, members);
+    if (roomIds.length === 0) return;
+    
+    try {
+      // First get read receipts
+      const keys = roomIds.map(id => `${user.uid}_${id}`);
+      const { data: receipts } = await supabase.from('read_receipts').select('roomId, readAt').in('id', keys);
+      
+      const newLastRead: Record<string, Date | null> = {};
+      receipts?.forEach(r => {
+        newLastRead[r.roomId] = r.readAt ? new Date(r.readAt) : null;
       });
-
+      setLastRead(prev => ({ ...prev, ...newLastRead }));
+      
+      // Then get recent messages
+      const { data: recentMessages } = await supabase
+        .from('chat_messages')
+        .select('*')
+        .in('roomId', roomIds)
+        .order('created_at', { ascending: false });
+        
+      if (!recentMessages) return;
+      
+      const userName = user?.displayName || user?.name || '';
+      const newRoomUnreads: Record<string, RoomUnread> = {};
+      
       roomIds.forEach(roomId => {
-        const q = query(
-          collection(db, 'chats', roomId, 'messages'),
-          orderBy('createdAt', 'desc'),
-          limit(50)
-        );
-        const unsub = safeOnSnapshot(q, snap => {
-          if (snap.empty) return;
-          const latest = snap.docs[0].data();
-
-          setLastRead(currentLastRead => {
-            const lr = currentLastRead[roomId] || null;
-            const unread = snap.docs.filter((d: any) => {
-              const data = d.data();
-              if (data.senderName === user.name) return false;
-              if (!lr) return true;
-              const msgTime = data.createdAt?.toDate?.();
-              return msgTime && msgTime > lr;
-            }).length;
-
-            setRoomUnreads(prev => ({
-              ...prev,
-              [roomId]: {
-                count: unread,
-                lastText: latest.text || '',
-                lastTime: latest.createdAt,
-              },
-            }));
-
-            return currentLastRead;
-          });
-        });
-        roomUnsubs.push(unsub);
+        const roomMsgs = recentMessages.filter(m => m.roomId === roomId);
+        if (roomMsgs.length === 0) return;
+        
+        const latest = roomMsgs[0];
+        const lr = newLastRead[roomId] || lastRead[roomId] || null;
+        
+        const unread = roomMsgs.filter(m => {
+          if (m.senderName === userName) return false;
+          if (!lr) return true;
+          return new Date(m.created_at) > lr;
+        }).length;
+        
+        newRoomUnreads[roomId] = {
+          count: unread,
+          lastText: latest.text,
+          lastTime: latest.created_at
+        };
       });
-    };
+      
+      setRoomUnreads(newRoomUnreads);
+    } catch(err) {
+      console.log('Error updating unread', err);
+    }
+  }, [user, venues, members, lastRead]);
 
-    // Scoped venues query — owners by ownerId, everyone else by
-    // assignedUids array-contains.
-    const venuesQuery = user.role === 'owner'
-      ? query(collection(db, 'venues'), where('ownerId', '==', user.uid))
-      : query(collection(db, 'venues'), where('assignedUids', 'array-contains', user.uid));
-
-    const u1 = safeOnSnapshot(venuesQuery, async snap => {
-      venues = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
-      members = await fetchMembers(venues);
-      subscribeToRooms();
-    });
-
-    return () => {
-      u1();
-      roomUnsubs.forEach(u => u());
-    };
-  }, [user?.uid]);
+  useEffect(() => {
+    if (venues.length === 0) return;
+    updateUnreadData();
+    
+    const roomIds = getRoomIds(venues, members);
+    if (roomIds.length === 0) return;
+    
+    const channel = supabase.channel('unread_messages_changes')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, () => {
+        updateUnreadData();
+      })
+      .subscribe();
+      
+    return () => { supabase.removeChannel(channel); };
+  }, [venues, members, user]);
 
   useEffect(() => {
     const total = Object.values(roomUnreads).reduce((sum, r) => sum + (r.count || 0), 0);
