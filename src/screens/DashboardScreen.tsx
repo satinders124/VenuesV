@@ -4,11 +4,10 @@ import {
   TouchableOpacity, ActivityIndicator, RefreshControl
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-
-const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
 
 type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; assignedUids?:string[]; };
 type Issue  = { id:string; status:string; priority:string; venueId:string; title:string; zone:string; by:string; createdAt:any; };
@@ -31,15 +30,9 @@ export default function DashboardScreen() {
   const fetchAllMembers = async (venueList: Venue[]) => {
     try {
       const results = await Promise.all(
-        venueList.map(v =>
-          fetch(TEAM_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
-          }).then(r => r.json()).catch(() => ({ members: [] }))
-        )
+        venueList.map(v => getVenueTeamMembers(v.id).catch(() => []))
       );
-      const allMembers = results.flatMap(r => r.members || []);
+      const allMembers = results.flat();
       const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
       setMembers(unique as Member[]);
     } catch (err) {

@@ -5,12 +5,11 @@ import {
   Platform, ActivityIndicator, RefreshControl
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { useUnread } from '../context/UnreadContext';
 import { Ionicons } from '@expo/vector-icons';
 import { notifyChatMessage } from '../config/notifications';
-
-const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
 
 type Message  = { id:string; text:string; senderName:string; senderRole:string; createdAt:any; };
 type Venue    = { id:string; name:string; suburb:string; ownerId?:string; assignedUids?:string[]; };
@@ -22,18 +21,13 @@ const ROLE_COLOR: Record<string,string> = {
   owner:'#f5a623', manager:'#2c7ef7', cleaner:'#00c896', staff:'#a855f7',
 };
 
-async function getTokensForUids(callerUid: string, venueId: string, uids: string[]): Promise<string[]> {
+async function getTokensForUids(_callerUid: string, venueId: string, uids: string[]): Promise<string[]> {
   try {
-    const resp = await fetch(TEAM_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callerUid, venueId }),
-    });
-    const data = await resp.json();
-    return (data.members || [])
-      .filter((m: any) => uids.includes(m.id))
-      .map((m: any) => m.expoPushToken)
-      .filter((t: any) => typeof t === 'string' && t.startsWith('ExponentPushToken'));
+    const members = await getVenueTeamMembers(venueId);
+    return members
+      .filter((member) => uids.includes(member.id))
+      .map((member) => member.expoPushToken)
+      .filter((token): token is string => typeof token === 'string' && token.startsWith('ExponentPushToken'));
   } catch {
     return [];
   }
@@ -68,15 +62,9 @@ export default function ChatScreen() {
   const fetchAllMembers = async (venueList: Venue[]) => {
     try {
       const results = await Promise.all(
-        venueList.map(v =>
-          fetch(TEAM_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
-          }).then(r => r.json()).catch(() => ({ members: [] }))
-        )
+        venueList.map(v => getVenueTeamMembers(v.id).catch(() => []))
       );
-      const allMembers = results.flatMap(r => r.members || []);
+      const allMembers = results.flat();
       const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
       setMembers(unique as Member[]);
     } catch (err) {

@@ -5,14 +5,12 @@ import {
   KeyboardAvoidingView, Platform, ScrollView
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { getVenueTeamMembers, inviteTeamMember, removeTeamMember } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { RefreshControl } from 'react-native';
 
-const INVITE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/inviteTeamMember';
-const REMOVE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/removeTeamMember';
-const TEAM_URL   = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
 
 type Member = { id:string; uid?:string; name:string; email:string; role:string; venue:string; venues?:string[]; };
 type Venue  = { id:string; name:string; ownerId?:string; assignedUids?:string[]; };
@@ -53,15 +51,9 @@ export default function TeamScreen() {
   const fetchAllMembers = async (venueList: Venue[]) => {
     try {
       const results = await Promise.all(
-        venueList.map(v =>
-          fetch(TEAM_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
-          }).then(r => r.json()).catch(() => ({ members: [] }))
-        )
+        venueList.map(v => getVenueTeamMembers(v.id).catch(() => []))
       );
-      const allMembers = results.flatMap(r => r.members || []);
+      const allMembers = results.flat();
       const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
       setMembers(unique as Member[]);
     } catch (err) {
@@ -120,23 +112,14 @@ export default function TeamScreen() {
 
     setInviting(true);
     try {
-      const resp = await fetch(INVITE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email, name, role, venue: venueName,
-          callerUid: user?.uid,
-        }),
-      });
-      const result = await resp.json();
-      if (!resp.ok) throw new Error(result.error || 'Failed to invite');
+      const result = await inviteTeamMember({ email, name, role, venueId });
 
       setModal(false); setName(''); setEmail('');
       Alert.alert(
         'Done',
         result.existed
           ? `${name} has been assigned to ${venueName}.`
-          : `${name} will receive an email with login details.`
+          : `${name} will receive an invitation email to set their password.`
       );
       await fetchAllMembers(venues);
     } catch (err: any) {
@@ -153,17 +136,9 @@ export default function TeamScreen() {
         setRemoving(true);
         try {
           const docId = m.uid || m.id;
-          const resp = await fetch(REMOVE_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              targetUid: docId,
-              venueName: targetVenue,
-              callerUid: user?.uid,
-            }),
-          });
-          const result = await resp.json();
-          if (!resp.ok) throw new Error(result.error || 'Failed to remove');
+          const venueForRemoval = venues.find((venue) => venue.name === targetVenue);
+          if (!venueForRemoval) throw new Error('Venue not found.');
+          await removeTeamMember({ targetUid: docId, venueId: venueForRemoval.id });
           await fetchAllMembers(venues);
         } catch (err: any) {
           Alert.alert('Error', err.message || 'Failed to remove team member.');

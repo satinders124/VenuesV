@@ -5,14 +5,12 @@ import {
   Alert, KeyboardAvoidingView, Platform
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { getVenueTeamMembers, inviteTeamMember, removeTeamMember } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { RefreshControl } from 'react-native';
 
-const INVITE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/inviteTeamMember';
-const REMOVE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/removeTeamMember';
-const TEAM_URL   = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
 const UPDATE_STRIPE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/updateStripeVenueCount';
 
 type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; assignedUids?:string[]; };
@@ -85,15 +83,9 @@ export default function OverviewScreen() {
   const fetchAllMembers = async (venueList: Venue[]) => {
     try {
       const results = await Promise.all(
-        venueList.map(v =>
-          fetch(TEAM_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
-          }).then(r => r.json()).catch(() => ({ members: [] }))
-        )
+        venueList.map(v => getVenueTeamMembers(v.id).catch(() => []))
       );
-      const allMembers = results.flatMap(r => r.members || []);
+      const allMembers = results.flat();
       const unique = Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
       setMembers(unique as Member[]);
     } catch (err) {
@@ -220,17 +212,8 @@ export default function OverviewScreen() {
       {text:'Remove',style:'destructive',onPress:async()=>{
         try {
           const docId = m.uid || m.id;
-          const resp = await fetch(REMOVE_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              targetUid: docId,
-              venueName: selVenue?.name,
-              callerUid: user?.uid,
-            }),
-          });
-          const result = await resp.json();
-          if (!resp.ok) throw new Error(result.error || 'Failed to remove');
+          if (!selVenue) throw new Error('No venue selected.');
+          await removeTeamMember({ targetUid: docId, venueId: selVenue.id });
           await fetchAllMembers(venues);
         } catch (err: any) {
           Alert.alert('Error', err.message || 'Failed to remove team member.');
@@ -244,16 +227,12 @@ export default function OverviewScreen() {
     if (!selVenue) {Alert.alert('Missing','No venue selected.');return;}
     setInviting(true);
     try {
-      const resp = await fetch(INVITE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: inviteEmail, name: inviteName, role: inviteRole,
-          venueName: selVenue.name, callerUid: user?.uid,
-        }),
+      await inviteTeamMember({
+        email: inviteEmail,
+        name: inviteName,
+        role: inviteRole as 'manager' | 'cleaner' | 'staff',
+        venueId: selVenue.id,
       });
-      const result = await resp.json();
-      if (!resp.ok) throw new Error(result.error || 'Failed to invite');
       setInviteName(''); setInviteEmail('');
       Alert.alert('✅ Invite Sent', `An invitation has been sent to ${inviteEmail}.`);
       await fetchAllMembers(venues);
@@ -546,20 +525,13 @@ export default function OverviewScreen() {
                         setSavingDetails(true);
                         try {
                           const docId = selectedMember.uid || selectedMember.id;
-                          const resp = await fetch(INVITE_URL, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              email: selectedMember.email,
-                              name: selectedMember.name,
-                              role: selectedMember.role,
-                              venueName: selVenue?.name,
-                              callerUid: user?.uid,
-                              existingUid: docId
-                            }),
+                          if (!selVenue) throw new Error('No venue selected.');
+                          await inviteTeamMember({
+                            email: selectedMember.email,
+                            name: selectedMember.name,
+                            role: selectedMember.role as 'manager' | 'cleaner' | 'staff',
+                            venueId: selVenue.id,
                           });
-                          const result = await resp.json();
-                          if (!resp.ok) throw new Error(result.error || 'Failed to assign');
                           setSelectedMember(null);
                           setMemberSearch('');
                           await fetchAllMembers(venues);

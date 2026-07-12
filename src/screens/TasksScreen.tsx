@@ -5,6 +5,7 @@ import {
   ActivityIndicator, KeyboardAvoidingView, Platform, FlatList
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
 import { notifyTaskCreated } from '../config/notifications';
@@ -31,19 +32,12 @@ const FREQ_CONFIG: Record<Frequency, { label:string; color:string }> = {
   once:   { label:'One-off', color:'#f5a623' },
 };
 
-const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
-
-async function getVenueTokens(callerUid: string, venueId: string): Promise<string[]> {
+async function getVenueTokens(_callerUid: string, venueId: string): Promise<string[]> {
   try {
-    const resp = await fetch(TEAM_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callerUid, venueId }),
-    });
-    const data = await resp.json();
-    return (data.members || [])
-      .map((m: any) => m.expoPushToken)
-      .filter((t: any) => typeof t === 'string' && t.startsWith('ExponentPushToken'));
+    const members = await getVenueTeamMembers(venueId);
+    return members
+      .map((member) => member.expoPushToken)
+      .filter((token): token is string => typeof token === 'string' && token.startsWith('ExponentPushToken'));
   } catch {
     return [];
   }

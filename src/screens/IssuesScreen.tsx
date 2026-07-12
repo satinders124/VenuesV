@@ -6,6 +6,7 @@ import {
   KeyboardAvoidingView, Platform, Image, Dimensions
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
@@ -18,19 +19,12 @@ import * as FileSystem from 'expo-file-system/legacy';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
-
-async function getVenueTokens(callerUid: string, venueId: string): Promise<string[]> {
+async function getVenueTokens(_callerUid: string, venueId: string): Promise<string[]> {
   try {
-    const resp = await fetch(TEAM_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callerUid, venueId }),
-    });
-    const data = await resp.json();
-    return (data.members || [])
-      .map((m: any) => m.expoPushToken)
-      .filter((t: any) => typeof t === 'string' && t.startsWith('ExponentPushToken'));
+    const members = await getVenueTeamMembers(venueId);
+    return members
+      .map((member) => member.expoPushToken)
+      .filter((token): token is string => typeof token === 'string' && token.startsWith('ExponentPushToken'));
   } catch {
     return [];
   }

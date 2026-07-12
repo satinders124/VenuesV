@@ -1,8 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { supabase } from '../config/supabase';
+import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from './AuthContext';
-
-const TEAM_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/getVenueTeamMembers';
 
 type RoomUnread = { count: number; lastText: string; lastTime: any; };
 
@@ -78,15 +77,9 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
   const fetchMembers = async (venueList: any[]): Promise<any[]> => {
     try {
       const results = await Promise.all(
-        venueList.map(v =>
-          fetch(TEAM_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callerUid: user?.uid, venueId: v.id }),
-          }).then(r => r.json()).catch(() => ({ members: [] }))
-        )
+        venueList.map(v => getVenueTeamMembers(v.id).catch(() => []))
       );
-      const allMembers = results.flatMap(r => r.members || []);
+      const allMembers = results.flat();
       return Array.from(new Map(allMembers.map((m: any) => [m.id, m])).values());
     } catch {
       return [];
