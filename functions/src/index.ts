@@ -790,3 +790,290 @@ export const getAdminData = onRequest(
     }
   }
 );
+
+
+// ── STRIPE PHASE A ────────────────────────────────────────
+// Requires: firebase functions:secrets:set STRIPE_SECRET_KEY
+// Set in Firebase: firebase functions:secrets:set STRIPE_SECRET_KEY
+// Then add to each function's secrets array: [STRIPE_SECRET_KEY]
+
+const STRIPE_SECRET = defineSecret('STRIPE_SECRET_KEY');
+const STRIPE_WEBHOOK_SECRET = defineSecret('STRIPE_WEBHOOK_SECRET');
+
+// ── CREATE STRIPE CUSTOMER (fires when owner users/{uid} doc is created) ──
+// Piggybacks on onUserCreated trigger — called separately so it's clean.
+export const createStripeCustomer = onRequest(
+  { cors: true, secrets: [STRIPE_SECRET] },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
+    const { uid, email, name, adminKey } = req.body;
+    if (adminKey !== 'venuesv-admin-2026') { res.status(401).json({ error: 'Unauthorised' }); return; }
+    if (!uid || !email) { res.status(400).json({ error: 'uid and email required' }); return; }
+
+    try {
+      const stripe = require('stripe')(STRIPE_SECRET.value());
+
+      // Check if customer already exists
+      const userSnap = await admin.firestore().collection('users').doc(uid).get();
+      if (userSnap.exists && userSnap.data()?.stripeCustomerId) {
+        res.status(200).json({ success: true, customerId: userSnap.data()?.stripeCustomerId, existed: true });
+        return;
+      }
+
+      // Create Stripe customer
+      const customer = await stripe.customers.create({
+        email,
+        name,
+        metadata: { firebaseUid: uid },
+      });
+
+      // Store on user doc
+      await admin.firestore().collection('users').doc(uid).update({
+        stripeCustomerId: customer.id,
+      });
+
+      console.log(`Stripe customer created: ${customer.id} for ${email}`);
+      res.status(200).json({ success: true, customerId: customer.id });
+    } catch (err: any) {
+      console.error('createStripeCustomer error:', err);
+      res.status(500).json({ error: err.message || 'Failed to create Stripe customer' });
+    }
+  }
+);
+
+// ── CREATE CHECKOUT SESSION ───────────────────────────────
+// Called from venuesv.com/subscribe — generates a Stripe Checkout URL
+// pre-loaded with the owner's venue count as the quantity.
+export const createCheckoutSession = onRequest(
+  { cors: true, secrets: [STRIPE_SECRET] },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
+    const { uid, email } = req.body;
+    if (!uid || !email) { res.status(400).json({ error: 'uid and email required' }); return; }
+
+    try {
+      const stripe = require('stripe')(STRIPE_SECRET.value());
+      const db = admin.firestore();
+
+      // countOnly mode — just return venue count without creating a session
+      if (req.body.countOnly) {
+        const venuesSnap = await db.collection('venues').where('ownerId', '==', uid).get();
+        res.status(200).json({ venueCount: Math.max(venuesSnap.size, 1) });
+        return;
+      }
+
+      // Get or create Stripe customer
+      const userSnap = await db.collection('users').doc(uid).get();
+      if (!userSnap.exists) { res.status(404).json({ error: 'User not found' }); return; }
+
+      let customerId = userSnap.data()?.stripeCustomerId;
+      if (!customerId) {
+        const customer = await stripe.customers.create({
+          email,
+          name: userSnap.data()?.name || '',
+          metadata: { firebaseUid: uid },
+        });
+        customerId = customer.id;
+        await db.collection('users').doc(uid).update({ stripeCustomerId: customerId });
+      }
+
+      // Count owner's active venues
+      const venuesSnap = await db.collection('venues')
+        .where('ownerId', '==', uid).get();
+      const venueCount = Math.max(venuesSnap.size, 1);
+
+      // Create Checkout Session
+      // REPLACE price_XXXXXX with your actual Stripe price ID after creating the product
+      const session = await stripe.checkout.sessions.create({
+        customer: customerId,
+        mode: 'subscription',
+        line_items: [{
+          price: 'price_1TljzwFONiTXGmGv2tuSbUbb',
+          quantity: venueCount,
+          adjustable_quantity: { enabled: false },
+        }],
+        subscription_data: {
+          metadata: { firebaseUid: uid, venueCount: String(venueCount) },
+        },
+        success_url: 'https://venuesv.com/subscribe?success=1&session_id={CHECKOUT_SESSION_ID}',
+        cancel_url: 'https://venuesv.com/subscribe?cancelled=true',
+        metadata: { firebaseUid: uid },
+        currency: 'aud',
+      });
+
+      res.status(200).json({ success: true, url: session.url });
+    } catch (err: any) {
+      console.error('createCheckoutSession error:', err);
+      res.status(500).json({ error: err.message || 'Failed to create checkout session' });
+    }
+  }
+);
+
+// ── STRIPE WEBHOOK ────────────────────────────────────────
+// Receives events from Stripe and updates subscriptionStatus in Firestore.
+// Stripe Dashboard → Webhooks → Add endpoint:
+//   URL: https://us-central1-venuev-b24c2.cloudfunctions.net/stripeWebhook
+//   Events: customer.subscription.created, customer.subscription.updated,
+//           customer.subscription.deleted, invoice.payment_succeeded,
+//           invoice.payment_failed
+export const stripeWebhook = onRequest(
+  { cors: false, secrets: [STRIPE_SECRET, STRIPE_WEBHOOK_SECRET] },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
+
+    const stripe = require('stripe')(STRIPE_SECRET.value());
+
+    // Firebase 2nd gen parses the body before it reaches the handler, making
+    // Stripe signature verification impossible without a custom Express setup.
+    // We instead validate the event by re-fetching it directly from Stripe
+    // using the event ID from the payload — this is secure and recommended
+    // as an alternative to signature verification.
+    let event: any;
+    try {
+      const eventId = req.body?.id;
+      if (!eventId) {
+        res.status(400).json({ error: 'No event ID' });
+        return;
+      }
+      // Fetch the event directly from Stripe to confirm it's real
+      event = await stripe.events.retrieve(eventId);
+    } catch (err: any) {
+      console.error('Stripe event fetch failed:', err.message);
+      res.status(400).send(`Webhook Error: ${err.message}`);
+      return;
+    }
+
+    const db = admin.firestore();
+
+    try {
+      switch (event.type) {
+
+        case 'customer.subscription.created':
+        case 'customer.subscription.updated': {
+          const sub = event.data.object;
+          const uid = sub.metadata?.firebaseUid;
+          if (!uid) break;
+
+          const status = sub.status; // active, past_due, canceled, trialing etc.
+          const venueCount = sub.quantity || 1;
+          const currentPeriodEnd = new Date(sub.current_period_end * 1000);
+
+          await db.collection('users').doc(uid).update({
+            subscriptionStatus: status === 'active' ? 'active' : status,
+            stripeSubscriptionId: sub.id,
+            stripeStatus: status,
+            venueCount,
+            subscriptionEndsAt: admin.firestore.Timestamp.fromDate(currentPeriodEnd),
+          });
+          console.log(`Subscription ${status} for uid: ${uid}, venues: ${venueCount}`);
+          break;
+        }
+
+        case 'customer.subscription.deleted': {
+          const sub = event.data.object;
+          const uid = sub.metadata?.firebaseUid;
+          if (!uid) break;
+
+          await db.collection('users').doc(uid).update({
+            subscriptionStatus: 'expired',
+            stripeStatus: 'canceled',
+          });
+          console.log(`Subscription cancelled for uid: ${uid}`);
+          break;
+        }
+
+        case 'invoice.payment_succeeded': {
+          const invoice = event.data.object;
+          const customerId = invoice.customer;
+
+          // Find user by stripeCustomerId
+          const userSnap = await db.collection('users')
+            .where('stripeCustomerId', '==', customerId).limit(1).get();
+          if (userSnap.empty) break;
+
+          const uid = userSnap.docs[0].id;
+          await db.collection('users').doc(uid).update({
+            subscriptionStatus: 'active',
+            lastPaymentAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          console.log(`Payment succeeded for uid: ${uid}`);
+          break;
+        }
+
+        case 'invoice.payment_failed': {
+          const invoice = event.data.object;
+          const customerId = invoice.customer;
+
+          const userSnap = await db.collection('users')
+            .where('stripeCustomerId', '==', customerId).limit(1).get();
+          if (userSnap.empty) break;
+
+          const uid = userSnap.docs[0].id;
+          await db.collection('users').doc(uid).update({
+            subscriptionStatus: 'payment_failed',
+          });
+          console.log(`Payment failed for uid: ${uid}`);
+          break;
+        }
+
+        default:
+          console.log(`Unhandled event type: ${event.type}`);
+      }
+
+      res.status(200).json({ received: true });
+    } catch (err: any) {
+      console.error('Webhook handler error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+// ── UPDATE VENUE COUNT IN STRIPE ──────────────────────────
+// Called from AddVenueScreen / venue deletion to keep Stripe
+// subscription quantity in sync with actual venue count.
+export const updateStripeVenueCount = onRequest(
+  { cors: true, secrets: [STRIPE_SECRET] },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).send('Method not allowed'); return; }
+    const { uid } = req.body;
+    if (!uid) { res.status(400).json({ error: 'uid required' }); return; }
+
+    try {
+      const stripe = require('stripe')(STRIPE_SECRET.value());
+      const db = admin.firestore();
+
+      const userSnap = await db.collection('users').doc(uid).get();
+      if (!userSnap.exists) { res.status(404).json({ error: 'User not found' }); return; }
+
+      const { stripeSubscriptionId, subscriptionStatus } = userSnap.data() as any;
+
+      // Only update if they have an active subscription
+      if (!stripeSubscriptionId || subscriptionStatus !== 'active') {
+        res.status(200).json({ success: true, skipped: true, reason: 'No active subscription' });
+        return;
+      }
+
+      // Count current venues
+      const venuesSnap = await db.collection('venues')
+        .where('ownerId', '==', uid).get();
+      const venueCount = Math.max(venuesSnap.size, 1);
+
+      // Update Stripe subscription quantity
+      const subscription = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+      const itemId = subscription.items.data[0].id;
+
+      await stripe.subscriptionItems.update(itemId, {
+        quantity: venueCount,
+        proration_behavior: 'always_invoice', // charge/credit immediately
+      });
+
+      await db.collection('users').doc(uid).update({ venueCount });
+
+      console.log(`Stripe venue count updated: uid ${uid} → ${venueCount} venues`);
+      res.status(200).json({ success: true, venueCount });
+    } catch (err: any) {
+      console.error('updateStripeVenueCount error:', err);
+      res.status(500).json({ error: err.message || 'Failed to update venue count' });
+    }
+  }
+);

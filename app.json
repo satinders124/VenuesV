@@ -7,17 +7,24 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
+    "primaryColor": "#00c896",
+    "description": "Venues V — Venue operations platform for Australian hospitality businesses. Manage zones, tasks, issues, and team communication across your venues.",
     "splash": {
-      "image": "./assets/icon.png",
+      "image": "./assets/splash.png",
       "resizeMode": "contain",
       "backgroundColor": "#080a0e"
     },
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "com.venuesv.app",
       "buildNumber": "1",
+      "requireFullScreen": true,
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCameraUsageDescription": "Venues V uses your camera to capture issue and task photos.",
+        "NSPhotoLibraryUsageDescription": "Venues V accesses your photo library to attach photos to issues.",
+        "NSPhotoLibraryAddUsageDescription": "Venues V saves proof photos to your camera roll.",
+        "NSUserNotificationsUsageDescription": "Venues V sends alerts for new issues, task updates, and team messages."
       }
     },
     "android": {
@@ -28,7 +35,30 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.venuesv.app",
-      "versionCode": 1
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE",
+        "android.permission.POST_NOTIFICATIONS"
+      ],
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "venuesv"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -42,16 +72,28 @@
           "sounds": []
         }
       ],
-
-      ["expo-media-library", {
-    "photosPermission": "Allow Venues V to save photos to your library."
-  }],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow Venues V to save photos to your library.",
+          "savePhotosPermission": "Allow Venues V to save proof photos to your camera roll.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Venues V accesses your photos to attach them to issues and tasks.",
+          "cameraPermission": "Venues V uses your camera to capture issue and task photos."
+        }
+      ],
       "expo-font"
     ],
     "extra": {
       "eas": {
         "projectId": "1267ba57-d8cf-492d-a1f5-c90980e30153"
       }
-    }
+    },
+    "scheme": "venuesv"
   }
 }

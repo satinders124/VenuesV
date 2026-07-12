@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, ActivityIndicator } from 'react-native';
+import { View, ActivityIndicator, AppState } from 'react-native';
 import { AuthProvider, useAuth } from './src/context/AuthContext';
 import AppNavigator, { navigationRef } from './src/navigation/AppNavigator';
 import { StatusBar } from 'expo-status-bar';
@@ -7,13 +7,12 @@ import { UnreadProvider } from './src/context/UnreadContext';
 import { resetTasksIfNeeded } from './src/config/resetTasks';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { registerForPushNotifications } from './src/config/notifications';
-import { updateDoc, collection, query, where, getDocs } from 'firebase/firestore';
+import { setDoc, doc, getDoc } from 'firebase/firestore';
 import { db } from './src/config/firebase';
 import * as Notifications from 'expo-notifications';
 import SplashScreen from './src/components/SplashScreen';
-import { setDoc, doc } from 'firebase/firestore';
+import { Linking } from 'react-native';
 
-// Handle incoming notifications while app is open
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert:  true,
@@ -24,7 +23,6 @@ Notifications.setNotificationHandler({
   }),
 });
 
-// Screen name from notification data → actual navigator screen name
 const SCREEN_MAP: Record<string, string> = {
   Issues:    'Issues',
   Tasks:     'Tasks',
@@ -37,30 +35,20 @@ function navigateFromNotification(screen: string | undefined) {
   if (!screen) return;
   const target = SCREEN_MAP[screen];
   if (!target) return;
-  if (navigationRef.isReady()) {
-    navigationRef.navigate(target);
-  }
+  if (navigationRef.isReady()) navigationRef.navigate(target);
 }
 
 function Root() {
-  const { loading, user } = useAuth();
+  const { loading, user, refreshUser } = useAuth();
 
   useEffect(() => {
     if (!user) return;
 
-    // Register for push notifications and save token
+    // Save push token directly to users/{uid}
     registerForPushNotifications().then(async token => {
       if (!token) return;
       try {
-        const snap = await getDocs(
-          query(collection(db,'users'), where('email','==',user.email))
-        );
-        if (!snap.empty) {
-          await updateDoc(doc(db,'users',snap.docs[0].id), {
-            expoPushToken: token,
-            uid: user.uid,
-          });
-        }
+        await setDoc(doc(db, 'users', user.uid), { expoPushToken: token }, { merge: true });
       } catch(err) {
         console.log('Token save error:', err);
       }
@@ -68,26 +56,35 @@ function Root() {
 
     resetTasksIfNeeded();
 
-    // Handle notification tap (app open or backgrounded)
+    // Notification tap handler
     const tapSub = Notifications.addNotificationResponseReceivedListener(response => {
       const screen = response.notification.request.content.data?.screen as string | undefined;
       navigateFromNotification(screen);
     });
 
-    // Handle notification received while app is in foreground (optional: navigate immediately)
-    // Uncomment if you want foreground notifications to also navigate:
-    // const fgSub = Notifications.addNotificationReceivedListener(notification => {
-    //   const screen = notification.request.content.data?.screen as string | undefined;
-    //   navigateFromNotification(screen);
-    // });
+    // Deep link handler — fired when app opens via venuesv:// URL
+    const linkSub = Linking.addEventListener('url', ({ url }) => {
+      if (url.includes('subscription-success')) {
+        // Refresh user doc so subscription banner disappears immediately
+        refreshUser();
+      }
+    });
+
+    // AppState handler — refresh user when app comes back to foreground
+    // This catches the case where user paid in browser then switched back
+    const appStateSub = AppState.addEventListener('change', state => {
+      if (state === 'active') {
+        refreshUser();
+      }
+    });
 
     return () => {
       tapSub.remove();
-      // fgSub.remove();
+      linkSub.remove();
+      appStateSub.remove();
     };
   }, [user]);
 
-  // Handle notification tap when app was killed (launched via notification)
   useEffect(() => {
     Notifications.getLastNotificationResponseAsync().then(response => {
       if (!response) return;
@@ -112,7 +109,6 @@ function Root() {
 
 export default function App() {
   const [showSplash, setShowSplash] = useState(true);
-
   return (
     <SafeAreaProvider>
       <AuthProvider>

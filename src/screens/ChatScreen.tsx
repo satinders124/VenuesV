@@ -21,7 +21,7 @@ type Message  = { id:string; text:string; senderName:string; senderRole:string; 
 type Venue    = { id:string; name:string; suburb:string; ownerId?:string; assignedUids?:string[]; };
 type Member   = { id:string; name:string; role:string; email:string; venue:string; venues?:string[]; expoPushToken?:string; };
 type ChatRoom = { id:string; name:string; subtitle:string; type:'venue'|'dm'; avatar:string; avatarColor:string; };
-type FilterType = 'venues'|'staff'|'cleaners'|'manager';
+type FilterType = 'venues'|'staff'|'cleaners'|'manager'|'owner';
 
 const ROLE_COLOR: Record<string,string> = {
   owner:'#f5a623', manager:'#2c7ef7', cleaner:'#00c896', staff:'#a855f7',
@@ -178,35 +178,43 @@ export default function ChatScreen() {
   const isMe = (msg:Message) => msg.senderName===user?.name;
 
   const getChatRooms = (): ChatRoom[] => {
-    if (isWorker) {
-      if (filter === 'venues') {
-        return venues.map(v=>({
-          id:v.id, name:v.name, subtitle:'Group Chat · All team',
-          type:'venue' as const, avatar:v.name.charAt(0), avatarColor:'#00c896',
-        }));
-      }
-      if (filter === 'manager') {
-        return members
-          .filter(m => m.role==='manager' && m.venue===user?.venue)
-          .map(m=>({
-            id:getDmId(m.name), name:m.name, subtitle:'Site Manager · Direct Message',
-            type:'dm' as const, avatar:getInitials(m.name), avatarColor:'#2c7ef7',
-          }));
-      }
-      return [];
-    }
-    if (filter==='venues') {
-      return venues.map(v=>({
-        id:v.id, name:v.name, subtitle:v.suburb||'Group Chat',
-        type:'venue' as const, avatar:v.name.charAt(0), avatarColor:'#00c896',
+    const myRole = user?.role;
+
+    // Venue group chats — everyone
+    if (filter === 'venues') {
+      return venues.map(v => ({
+        id: v.id, name: v.name,
+        subtitle: myRole === 'owner' ? v.suburb || 'Group Chat' : 'Group Chat · All team',
+        type: 'venue' as const, avatar: v.name.charAt(0), avatarColor: '#00c896',
       }));
     }
-    const role = filter==='staff'?'staff':'cleaner';
+
+    // DM matrix per role
+    const dmAllowed: Record<string, string[]> = {
+      owner:   ['manager'],
+      manager: ['owner', 'staff', 'cleaner'],
+      cleaner: ['manager', 'staff'],
+      staff:   ['manager', 'cleaner'],
+    };
+    const allowed = dmAllowed[myRole || ''] || [];
+
+    const filterRoleMap: Record<string, string> = {
+      manager: 'manager', owner: 'owner', staff: 'staff', cleaners: 'cleaner',
+    };
+    const targetRole = filterRoleMap[filter];
+    if (!targetRole || !allowed.includes(targetRole)) return [];
+
+    const roleLabel: Record<string, string> = {
+      owner: 'Owner', manager: 'Site Manager', cleaner: 'Cleaner', staff: 'Staff',
+    };
+
     return members
-      .filter(m=>m.role===role && m.name!==user?.name && m.venue===user?.venue)
-      .map(m=>({
-        id:getDmId(m.name), name:m.name, subtitle:`${m.role} · Direct Message`,
-        type:'dm' as const, avatar:getInitials(m.name), avatarColor:ROLE_COLOR[m.role]||'#6e7a8a',
+      .filter(m => m.role === targetRole && m.name !== user?.name)
+      .map(m => ({
+        id: getDmId(m.id), name: m.name,
+        subtitle: `${roleLabel[m.role] || m.role} · Direct Message`,
+        type: 'dm' as const, avatar: getInitials(m.name),
+        avatarColor: ROLE_COLOR[m.role] || '#6e7a8a',
       }));
   };
 
@@ -214,9 +222,13 @@ export default function ChatScreen() {
 
   // ── CHAT LIST ───────────────────────────────────────
   if (!activeRoom) {
-    const filters: {key:FilterType; label:string}[] = isWorker
-      ? [{key:'venues',label:'🏢 Venue'},{key:'manager',label:'💬 Manager'}]
-      : [{key:'venues',label:'🏢 Venues'},{key:'staff',label:'🍺 Staff'},{key:'cleaners',label:'🧹 Cleaners'}];
+    const filtersByRole: Record<string, {key:FilterType; label:string}[]> = {
+      owner:   [{key:'venues',label:'Venues'},{key:'manager',label:'Managers'}],
+      manager: [{key:'venues',label:'Venues'},{key:'owner',label:'Owner'},{key:'staff',label:'Staff'},{key:'cleaners',label:'Cleaners'}],
+      cleaner: [{key:'venues',label:'Venues'},{key:'manager',label:'Manager'},{key:'staff',label:'Staff'}],
+      staff:   [{key:'venues',label:'Venues'},{key:'manager',label:'Manager'},{key:'cleaners',label:'Cleaners'}],
+    };
+    const filters = filtersByRole[user?.role || ''] || [{key:'venues' as FilterType, label:'Venues'}];
 
     return (
       <SafeAreaView style={s.container}>

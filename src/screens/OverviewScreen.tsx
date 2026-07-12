@@ -52,6 +52,8 @@ const INVITE_ROLES = [
   {id:'staff',   label:'Venue Staff'},
 ];
 
+const UPDATE_STRIPE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/updateStripeVenueCount';
+
 export default function OverviewScreen() {
   const { user } = useAuth();
   const navigation = useNavigation<any>();
@@ -482,6 +484,17 @@ export default function OverviewScreen() {
                           await Promise.all(usersSnap.docs.map((d: any) =>updateDoc(doc(db,'users',d.id),{venue:''})));
 
                           await deleteDoc(doc(db,'venues',venueId));
+
+                          // Sync venue count with Stripe
+                          const ownerId = selVenue?.ownerId || user?.uid;
+                          if (ownerId) {
+                            fetch(UPDATE_STRIPE_URL, {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ uid: ownerId }),
+                            }).catch(() => {}); // fire and forget
+                          }
+
                           setSelVenue(null);
                         }},
                       ])}

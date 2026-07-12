@@ -1,5 +1,6 @@
 import 'react-native-gesture-handler';
 import React, { useEffect, useState, useRef } from 'react';
+import { View } from 'react-native';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -9,6 +10,7 @@ import { db } from '../config/firebase';
 import { safeOnSnapshot } from '../config/firestoreHelpers';
 
 import { useAuth } from '../context/AuthContext';
+import SubscriptionBanner from '../components/SubscriptionBanner';
 import { useUnread } from '../context/UnreadContext';
 import LoginScreen     from '../screens/LoginScreen';
 import DashboardScreen from '../screens/DashboardScreen';
@@ -191,16 +193,19 @@ function AppStack() {
              : StaffTabs;
 
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="Tabs" component={Tabs} />
-      {isOwnerOrManager && (
-        <>
-          <Stack.Screen name="Team"     component={TeamScreen}    />
-          <Stack.Screen name="AddVenue" component={AddVenueScreen}/>
-          <Stack.Screen name="Reports"  component={ReportsScreen} />
-        </>
-      )}
-    </Stack.Navigator>
+    <View style={{ flex: 1 }}>
+      <SubscriptionBanner />
+      <Stack.Navigator screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="Tabs" component={Tabs} />
+        {isOwnerOrManager && (
+          <>
+            <Stack.Screen name="Team"     component={TeamScreen}    />
+            <Stack.Screen name="AddVenue" component={AddVenueScreen}/>
+            <Stack.Screen name="Reports"  component={ReportsScreen} />
+          </>
+        )}
+      </Stack.Navigator>
+    </View>
   );
 }
 

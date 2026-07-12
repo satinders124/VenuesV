@@ -1,13 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView,
+  View, Text, StyleSheet,
   TouchableOpacity, TextInput, ScrollView,
   Alert, ActivityIndicator, KeyboardAvoidingView, Platform
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { collection, addDoc, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
+import { Linking } from 'react-native';
+
+const UPDATE_STRIPE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/updateStripeVenueCount';
 
 const VENUE_TYPES = [
   { id:'tavern',  emoji:'🍺', label:'Tavern / Pub'     },
@@ -63,11 +67,50 @@ export default function AddVenueScreen() {
     })();
   }, [user]);
 
+  const { isLocked } = useAuth();
+
   const addVenue = async () => {
+    if (isLocked) {
+      Alert.alert('Subscription required', 'Your trial has ended. Please subscribe to add new venues.', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Subscribe', onPress: () => Linking.openURL('https://venuesv.com/subscribe') },
+      ]);
+      return;
+    }
     if (!name || !suburb) {
       Alert.alert('Missing fields', 'Please enter venue name and suburb.');
       return;
     }
+
+    // If subscribed, warn about price increase before proceeding
+    if (user?.subscriptionStatus === 'active') {
+      const venueSnap = await getDocs(
+        query(collection(db, 'venues'), where('ownerId', '==', user?.uid))
+      );
+      const currentCount = venueSnap.size;
+      const newCount = currentCount + 1;
+      const newWeekly = (newCount * 19.95).toFixed(2);
+      const added = (19.95).toFixed(2);
+
+      return new Promise<void>((resolve) => {
+        Alert.alert(
+          'Subscription update',
+          `Adding "${name}" will increase your subscription from ${currentCount} to ${newCount} venue${newCount > 1 ? 's' : ''}.
+
+New weekly total: $${newWeekly} AUD
+(+$${added}/week, prorated immediately)`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Add Venue', onPress: () => resolve() },
+          ]
+        );
+      }).then(() => _doAddVenue());
+    }
+
+    _doAddVenue();
+  };
+
+  const _doAddVenue = async () => {
 
     const isManager = user?.role === 'manager';
     if (isManager && (!managerOwnerId || !managerExistingVenueId)) {
@@ -111,16 +154,23 @@ export default function AddVenueScreen() {
         'Main Area':'🏢',
       };
 
-      for (const zoneName of defaultZones) {
-        await addDoc(collection(db, 'zones'), {
+      await Promise.all(defaultZones.map(zoneName =>
+        addDoc(collection(db, 'zones'), {
           name: zoneName,
           icon: zoneIcons[zoneName] || '📍',
           status: 'clean',
           score: 100,
           venueId: venueRef.id,
           createdAt: serverTimestamp(),
-        });
-      }
+        })
+      ));
+
+      // Sync venue count with Stripe (only if subscribed — function handles skip logic)
+      fetch(UPDATE_STRIPE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uid: isManager ? managerOwnerId : user?.uid }),
+      }).catch(() => {}); // fire and forget — non-blocking
 
       Alert.alert(
         '✅ Venue Added!',

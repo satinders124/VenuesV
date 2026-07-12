@@ -11,12 +11,14 @@ import {
 import { auth } from '../config/firebase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
+import { Linking } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 const OWNER_MENU = [
   { icon:'people-outline',    label:'Team',     desc:'Manage site managers, cleaners and staff', color:'#2c7ef7', screen:'Team'     },
   { icon:'bar-chart-outline', label:'Reports',  desc:'Download weekly reports per venue',         color:'#00c896', screen:'Reports'  },
   { icon:'add-circle-outline',label:'Add Venue',desc:'Register a new venue',                      color:'#a855f7', screen:'AddVenue' },
+  { icon:'card-outline',      label:'Billing',  desc:'View your subscription and usage',          color:'#f5a623', screen:'Billing'  },
 ];
 
 const MANAGER_MENU = [
@@ -31,10 +33,11 @@ const CLEANER_MENU = [
 ];
 
 export default function MoreScreen() {
-  const { user, logout } = useAuth();
+  const { user, logout, isLocked, trialDaysLeft } = useAuth();
   const navigation = useNavigation<any>();
 
-  const [pwdModalOpen, setPwdModalOpen] = useState(false);
+  const [pwdModalOpen,     setPwdModalOpen]     = useState(false);
+  const [billingModalOpen, setBillingModalOpen] = useState(false);
   const [currentPwd, setCurrentPwd]     = useState('');
   const [newPwd, setNewPwd]             = useState('');
   const [confirmPwd, setConfirmPwd]     = useState('');
@@ -134,6 +137,7 @@ export default function MoreScreen() {
               key={item.label}
               style={[s.menuItem, i === MENU_ITEMS.length - 1 && s.menuItemLast]}
               onPress={() => {
+                if (item.screen === 'Billing') { setBillingModalOpen(true); return; }
                 if (item.screen) navigation.navigate(item.screen);
                 else Alert.alert(item.label, `${item.label} coming soon!`);
               }}
@@ -179,6 +183,65 @@ export default function MoreScreen() {
         <Text style={s.version}>Venues V v1.0.0</Text>
 
       </ScrollView>
+
+      {/* Billing Modal */}
+      <Modal visible={billingModalOpen} transparent animationType="slide">
+        <View style={s.modalOverlay}>
+          <View style={s.modalBox}>
+            <View style={s.modalHeader}>
+              <Text style={s.modalTitle}>Billing & Subscription</Text>
+              <TouchableOpacity onPress={()=>setBillingModalOpen(false)}>
+                <Text style={s.modalClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Status row */}
+            <View style={s.billingStatus}>
+              <View style={[s.billingDot, {backgroundColor: user?.subscriptionStatus==='active'?'#00c896':isLocked?'#f24e6e':'#f5a623'}]}/>
+              <Text style={s.billingStatusText}>
+                {user?.subscriptionStatus === 'active'
+                  ? 'Active subscription'
+                  : isLocked
+                  ? 'Trial ended — action required'
+                  : trialDaysLeft !== null && trialDaysLeft <= 3
+                  ? `Trial ending soon — ${trialDaysLeft} day${trialDaysLeft===1?'':'s'} left`
+                  : 'Free trial active'}
+              </Text>
+            </View>
+
+            {/* Price breakdown — only show when subscribed */}
+            {user?.subscriptionStatus === 'active' && (
+              <View style={s.billingBreakdown}>
+                <View style={s.billingRow}>
+                  <Text style={s.billingLabel}>Venues</Text>
+                  <Text style={s.billingVal}>{user?.venueCount ?? 1}</Text>
+                </View>
+                <View style={s.billingRow}>
+                  <Text style={s.billingLabel}>Price per venue</Text>
+                  <Text style={s.billingVal}>$19.95 / week</Text>
+                </View>
+                <View style={[s.billingRow, {borderBottomWidth:0, paddingTop:12}]}>
+                  <Text style={[s.billingLabel, {fontSize:15, fontWeight:'700', color:'#eef0f4'}]}>Total per week</Text>
+                  <Text style={[s.billingVal, {fontSize:22, color:'#00c896'}]}>${((user?.venueCount ?? 1) * 19.95).toFixed(2)}</Text>
+                </View>
+              </View>
+            )}
+
+            {/* CTA */}
+            <TouchableOpacity
+              style={[s.sendBtn, {marginTop:8}]}
+              onPress={()=>{ setBillingModalOpen(false); Linking.openURL('https://venuesv.com/subscribe'); }}
+            >
+              <Text style={s.sendBtnText}>
+                {user?.subscriptionStatus==='active' ? 'Manage subscription →' : 'Subscribe now →'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.cancelBtn, {marginTop:10}]} onPress={()=>setBillingModalOpen(false)}>
+              <Text style={s.cancelBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Change Password Modal */}
       <Modal visible={pwdModalOpen} transparent animationType="slide">
@@ -251,6 +314,19 @@ const s = StyleSheet.create({
   header:       { marginBottom:4 },
   heading:      { fontSize:28, fontWeight:'800', color:'#eef0f4' },
   userCard:     { backgroundColor:'#0f1218', borderWidth:1, borderColor:'rgba(255,255,255,.07)', borderRadius:16, padding:16, flexDirection:'row', alignItems:'center', gap:14 },
+  subCard:      { backgroundColor:'#0f1218', borderWidth:1, borderColor:'rgba(255,255,255,.07)', borderRadius:16, padding:16, gap:14 },
+  subCardTop:   { flexDirection:'row', alignItems:'center', justifyContent:'space-between' },
+  subCardTitle: { fontSize:15, fontWeight:'700', color:'#eef0f4', marginBottom:4 },
+  subCardStatus:{ fontSize:13, color:'#6e7a8a', fontWeight:'500' },
+  subBadge:     { backgroundColor:'rgba(0,200,150,.1)', borderWidth:1, borderColor:'rgba(0,200,150,.2)', borderRadius:99, paddingHorizontal:10, paddingVertical:4 },
+  subBadgeText: { fontSize:10, fontWeight:'800', color:'#00c896', letterSpacing:.5 },
+  subPriceRow:  { flexDirection:'row', backgroundColor:'#080a0e', borderRadius:12, overflow:'hidden' },
+  subPriceItem: { flex:1, padding:14, alignItems:'center' },
+  subPriceDivider:{ width:1, backgroundColor:'rgba(255,255,255,.06)' },
+  subPriceVal:  { fontSize:20, fontWeight:'900', color:'#00c896', letterSpacing:-.5 },
+  subPriceLabel:{ fontSize:11, color:'#6e7a8a', marginTop:4, fontWeight:'500' },
+  subBtn:       { backgroundColor:'rgba(0,200,150,.08)', borderWidth:1, borderColor:'rgba(0,200,150,.2)', borderRadius:10, padding:12, alignItems:'center' },
+  subBtnText:   { fontSize:13, color:'#00c896', fontWeight:'700' },
   avatar:       { width:52, height:52, borderRadius:26, alignItems:'center', justifyContent:'center' },
   avatarText:   { fontSize:18, fontWeight:'800' },
   userInfo:     { flex:1 },
@@ -267,7 +343,14 @@ const s = StyleSheet.create({
   menuDesc:     { fontSize:12, color:'#6e7a8a', marginTop:2 },
   logoutBtn:    { backgroundColor:'rgba(242,78,110,.1)', borderWidth:1, borderColor:'rgba(242,78,110,.3)', borderRadius:12, padding:15, alignItems:'center', flexDirection:'row', justifyContent:'center', gap:8 },
   logoutText:   { color:'#f24e6e', fontWeight:'700', fontSize:14 },
-  version:      { textAlign:'center', fontSize:12, color:'#3a4252' },
+  version:       { textAlign:'center', fontSize:12, color:'#3a4252' },
+  billingStatus: { flexDirection:'row', alignItems:'center', gap:8, backgroundColor:'rgba(255,255,255,.04)', borderRadius:10, padding:12, marginBottom:14 },
+  billingDot:    { width:8, height:8, borderRadius:4 },
+  billingStatusText:{ fontSize:13, color:'#eef0f4', fontWeight:'500', flex:1 },
+  billingBreakdown:{ backgroundColor:'#080a0e', borderRadius:12, overflow:'hidden', marginBottom:14 },
+  billingRow:    { flexDirection:'row', justifyContent:'space-between', alignItems:'center', padding:14, borderBottomWidth:1, borderBottomColor:'rgba(255,255,255,.06)' },
+  billingLabel:  { fontSize:13, color:'#6e7a8a' },
+  billingVal:    { fontSize:14, fontWeight:'700', color:'#eef0f4' },
   modalOverlay: { flex:1, backgroundColor:'rgba(0,0,0,.75)', justifyContent:'flex-end' },
   modalBox:     { backgroundColor:'#0f1218', borderTopLeftRadius:20, borderTopRightRadius:20, padding:24 },
   modalHeader:  { flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:18 },
