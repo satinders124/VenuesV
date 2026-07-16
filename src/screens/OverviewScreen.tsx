@@ -145,35 +145,46 @@ export default function OverviewScreen() {
     fetchData();
   };
 
-  const confirmDeleteVenue = () => {
-    if (!selVenue) return;
+  const openVenueActions = () => {
+    if (!selVenue || user?.role !== 'owner') return;
     const venueToDelete = selVenue;
     Alert.alert(
-      'Delete venue?',
-      `Delete "${venueToDelete.name}"? This removes its zones, tasks, issues and venue chat history. This action cannot be undone.`,
+      'Venue actions',
+      venueToDelete.name,
       [
-        { text: 'No', style: 'cancel' },
+        { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Yes, delete venue',
+          text: 'Delete venue',
           style: 'destructive',
-          onPress: async () => {
-            setDeletingVenue(true);
-            try {
-              const deletedName = venueToDelete.name;
-              await deleteVenueApi(venueToDelete.id);
-              setSelVenue(null);
-              setVenues((current) => current.filter((venue) => venue.id !== venueToDelete.id));
-              setTasks((current) => current.filter((task) => task.venueId !== venueToDelete.id));
-              setIssues((current) => current.filter((issue) => issue.venueId !== venueToDelete.id));
-              setZones((current) => current.filter((zone) => zone.venueId !== venueToDelete.id));
-              await fetchData();
-              Alert.alert('Venue deleted', `${deletedName} has been deleted.`);
-            } catch (error: any) {
-              Alert.alert('Could not delete venue', error.message || 'Please try again.');
-            } finally {
-              setDeletingVenue(false);
-            }
-          },
+          onPress: () => Alert.alert(
+            `Delete ${venueToDelete.name}?`,
+            'This permanently removes its zones, tasks, issues and venue chat history. This cannot be undone.',
+            [
+              { text: 'No', style: 'cancel' },
+              {
+                text: 'Yes, delete venue',
+                style: 'destructive',
+                onPress: async () => {
+                  setDeletingVenue(true);
+                  try {
+                    const deletedName = venueToDelete.name;
+                    await deleteVenueApi(venueToDelete.id);
+                    setSelVenue(null);
+                    setVenues((current) => current.filter((venue) => venue.id !== venueToDelete.id));
+                    setTasks((current) => current.filter((task) => task.venueId !== venueToDelete.id));
+                    setIssues((current) => current.filter((issue) => issue.venueId !== venueToDelete.id));
+                    setZones((current) => current.filter((zone) => zone.venueId !== venueToDelete.id));
+                    await fetchData();
+                    Alert.alert('Venue deleted', `${deletedName} has been deleted.`);
+                  } catch (error: any) {
+                    Alert.alert('Could not delete venue', error.message || 'Please try again.');
+                  } finally {
+                    setDeletingVenue(false);
+                  }
+                },
+              },
+            ],
+          ),
         },
       ],
     );
@@ -388,13 +399,20 @@ export default function OverviewScreen() {
             <View style={s.mgmtBox}>
               <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
                 <View style={s.mgmtHeader}>
-                  <View>
+                  <View style={{ flex: 1 }}>
                     <Text style={s.mgmtTitle}>{selVenue?.name}</Text>
-                    <Text style={s.mgmtSub}>Management Settings</Text>
+                    <Text style={s.mgmtSub}>Venue settings</Text>
                   </View>
-                  <TouchableOpacity onPress={()=>setSelVenue(null)}>
-                    <Text style={s.mgmtClose}>✕</Text>
-                  </TouchableOpacity>
+                  <View style={s.mgmtHeaderActions}>
+                    {user?.role === 'owner' && (
+                      <TouchableOpacity style={s.headerIconBtn} onPress={openVenueActions} disabled={deletingVenue}>
+                        <Ionicons name="ellipsis-horizontal" color="#a8b3c4" size={20}/>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity style={s.headerIconBtn} onPress={()=>setSelVenue(null)}>
+                      <Ionicons name="close" color="#a8b3c4" size={20}/>
+                    </TouchableOpacity>
+                  </View>
                 </View>
 
                 <View style={s.tabRow}>
@@ -417,15 +435,6 @@ export default function OverviewScreen() {
                     <TouchableOpacity style={s.saveBtn} onPress={saveDetails} disabled={savingDetails || deletingVenue}>
                       {savingDetails?<ActivityIndicator color="#000"/>:<Text style={s.saveBtnText}>Save Changes</Text>}
                     </TouchableOpacity>
-                    {user?.role === 'owner' && (
-                      <View style={s.dangerZone}>
-                        <Text style={s.dangerTitle}>DANGER ZONE</Text>
-                        <Text style={s.dangerText}>Deleting a venue permanently removes its operational data.</Text>
-                        <TouchableOpacity style={s.deleteVenueBtn} onPress={confirmDeleteVenue} disabled={deletingVenue}>
-                          {deletingVenue ? <ActivityIndicator color="#fff"/> : <Text style={s.deleteVenueBtnText}>Delete Venue</Text>}
-                        </TouchableOpacity>
-                      </View>
-                    )}
                   </View>
                 )}
 
@@ -655,10 +664,11 @@ const s = StyleSheet.create({
   manageBtnText:   {color:'#2c7ef7',fontWeight:'700',fontSize:13},
   mgmtOverlay:     {flex:1,backgroundColor:'rgba(0,0,0,.75)',justifyContent:'flex-end'},
   mgmtBox:         {backgroundColor:'#0f1218',borderTopLeftRadius:22,borderTopRightRadius:22,padding:22,maxHeight:'92%'},
-  mgmtHeader:      {flexDirection:'row',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16},
+  mgmtHeader:      {flexDirection:'row',justifyContent:'space-between',alignItems:'center',marginBottom:16},
+  mgmtHeaderActions:{flexDirection:'row',alignItems:'center',gap:8},
+  headerIconBtn:   {width:36,height:36,borderRadius:12,backgroundColor:'#161b24',borderWidth:1,borderColor:'rgba(255,255,255,.08)',alignItems:'center',justifyContent:'center'},
   mgmtTitle:       {fontSize:20,fontWeight:'800',color:'#eef0f4'},
   mgmtSub:         {fontSize:13,color:'#6e7a8a',marginTop:2},
-  mgmtClose:       {fontSize:20,color:'#6e7a8a',padding:4},
   tabRow:          {flexDirection:'row',backgroundColor:'#161b24',borderRadius:10,padding:3,marginBottom:18,gap:3},
   tab:             {flex:1,padding:9,borderRadius:8,alignItems:'center'},
   tabActive:       {backgroundColor:'#0f1218'},

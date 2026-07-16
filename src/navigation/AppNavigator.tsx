@@ -6,6 +6,7 @@ import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
+import { Colors, Radius, Space } from '../theme/tokens';
 
 import { useAuth } from '../context/AuthContext';
 import SubscriptionBanner from '../components/SubscriptionBanner';
@@ -27,16 +28,17 @@ const Tab   = createBottomTabNavigator();
 const TAB_OPTIONS = {
   headerShown: false,
   tabBarStyle: {
-    backgroundColor: '#0f1218',
-    borderTopColor: 'rgba(255,255,255,0.15)',
+    backgroundColor: Colors.surface,
+    borderTopColor: Colors.border,
     borderTopWidth: 1,
-    paddingBottom: 8,
-    paddingTop: 6,
-    height: 65,
+    paddingBottom: Space.xs,
+    paddingTop: Space.xs,
+    height: 72,
   },
-  tabBarActiveTintColor: '#00c896',
-  tabBarInactiveTintColor: '#6e7a8a',
-  tabBarLabelStyle: { fontSize: 11, fontWeight: '700' as const },
+  tabBarItemStyle: { borderRadius: Radius.md, marginHorizontal: 3 },
+  tabBarActiveTintColor: Colors.brand,
+  tabBarInactiveTintColor: Colors.textMuted,
+  tabBarLabelStyle: { fontSize: 11, fontWeight: '700' as const, marginTop: 1 },
 };
 
 function useIssuesBadge() {
