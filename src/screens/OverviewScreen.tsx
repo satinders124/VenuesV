@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import { supabase } from '../config/supabase';
 import { getVenueTeamMembers, inviteTeamMember, removeTeamMember } from '../config/teamApi';
+import { deleteVenue as deleteVenueApi } from '../config/venueApi';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -63,6 +64,7 @@ export default function OverviewScreen() {
   const [editName,      setEditName]      = useState('');
   const [editSuburb,    setEditSuburb]    = useState('');
   const [savingDetails, setSavingDetails] = useState(false);
+  const [deletingVenue, setDeletingVenue] = useState(false);
 
   const [addingZone,   setAddingZone]   = useState(false);
   const [newZoneName,  setNewZoneName]  = useState('');
@@ -141,6 +143,40 @@ export default function OverviewScreen() {
   const onRefresh = () => {
     setRefreshing(true);
     fetchData();
+  };
+
+  const confirmDeleteVenue = () => {
+    if (!selVenue) return;
+    const venueToDelete = selVenue;
+    Alert.alert(
+      'Delete venue?',
+      `Delete "${venueToDelete.name}"? This removes its zones, tasks, issues and venue chat history. This action cannot be undone.`,
+      [
+        { text: 'No', style: 'cancel' },
+        {
+          text: 'Yes, delete venue',
+          style: 'destructive',
+          onPress: async () => {
+            setDeletingVenue(true);
+            try {
+              const deletedName = venueToDelete.name;
+              await deleteVenueApi(venueToDelete.id);
+              setSelVenue(null);
+              setVenues((current) => current.filter((venue) => venue.id !== venueToDelete.id));
+              setTasks((current) => current.filter((task) => task.venueId !== venueToDelete.id));
+              setIssues((current) => current.filter((issue) => issue.venueId !== venueToDelete.id));
+              setZones((current) => current.filter((zone) => zone.venueId !== venueToDelete.id));
+              await fetchData();
+              Alert.alert('Venue deleted', `${deletedName} has been deleted.`);
+            } catch (error: any) {
+              Alert.alert('Could not delete venue', error.message || 'Please try again.');
+            } finally {
+              setDeletingVenue(false);
+            }
+          },
+        },
+      ],
+    );
   };
 
   useEffect(() => {
@@ -378,9 +414,18 @@ export default function OverviewScreen() {
                     <TextInput style={s.input} value={editName} onChangeText={setEditName}/>
                     <Text style={s.fieldLabel}>SUBURB</Text>
                     <TextInput style={s.input} value={editSuburb} onChangeText={setEditSuburb}/>
-                    <TouchableOpacity style={s.saveBtn} onPress={saveDetails} disabled={savingDetails}>
+                    <TouchableOpacity style={s.saveBtn} onPress={saveDetails} disabled={savingDetails || deletingVenue}>
                       {savingDetails?<ActivityIndicator color="#000"/>:<Text style={s.saveBtnText}>Save Changes</Text>}
                     </TouchableOpacity>
+                    {user?.role === 'owner' && (
+                      <View style={s.dangerZone}>
+                        <Text style={s.dangerTitle}>DANGER ZONE</Text>
+                        <Text style={s.dangerText}>Deleting a venue permanently removes its operational data.</Text>
+                        <TouchableOpacity style={s.deleteVenueBtn} onPress={confirmDeleteVenue} disabled={deletingVenue}>
+                          {deletingVenue ? <ActivityIndicator color="#fff"/> : <Text style={s.deleteVenueBtnText}>Delete Venue</Text>}
+                        </TouchableOpacity>
+                      </View>
+                    )}
                   </View>
                 )}
 
@@ -624,6 +669,11 @@ const s = StyleSheet.create({
   input:           {backgroundColor:'#161b24',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderRadius:10,padding:13,color:'#eef0f4',fontSize:14,marginBottom:4},
   saveBtn:         {backgroundColor:'#00c896',borderRadius:10,padding:13,alignItems:'center',marginTop:8},
   saveBtnText:     {color:'#000',fontWeight:'700',fontSize:14},
+  dangerZone:      {marginTop:18,paddingTop:16,borderTopWidth:1,borderTopColor:'rgba(242,78,110,.25)'},
+  dangerTitle:     {fontSize:11,fontWeight:'800',color:'#f24e6e',letterSpacing:.7},
+  dangerText:      {fontSize:12,color:'#8892aa',lineHeight:18,marginTop:6},
+  deleteVenueBtn:  {backgroundColor:'#f24e6e',borderRadius:10,padding:13,alignItems:'center',marginTop:12},
+  deleteVenueBtnText:{color:'#fff',fontWeight:'800',fontSize:14},
   zoneRow:         {flexDirection:'row',alignItems:'center',gap:10,paddingVertical:10,borderBottomWidth:1,borderBottomColor:'rgba(255,255,255,.05)'},
   zoneIcon:        {fontSize:22},
   zoneInfo:        {flex:1},
