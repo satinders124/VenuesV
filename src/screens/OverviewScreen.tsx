@@ -5,6 +5,7 @@ import {
   Alert, KeyboardAvoidingView, Platform
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { fetchVenuesForUser } from '../config/fetchVenues';
 import { getVenueTeamMembers, inviteTeamMember, removeTeamMember } from '../config/teamApi';
 import { deleteVenue as deleteVenueApi } from '../config/venueApi';
 import { useAuth } from '../context/AuthContext';
@@ -96,14 +97,7 @@ export default function OverviewScreen() {
   const fetchData = useCallback(async () => {
     if (!user) return;
     try {
-      let vList: Venue[] = [];
-      if (user.role === 'owner') {
-        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
-        vList = (data || []) as Venue[];
-      } else {
-        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
-        vList = (data || []) as Venue[];
-      }
+      const vList = await fetchVenuesForUser(user.uid, user.role) as Venue[];
       
       setVenues(vList);
       

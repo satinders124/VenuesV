@@ -5,6 +5,7 @@ import {
   ActivityIndicator, KeyboardAvoidingView, Platform, FlatList
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { fetchVenuesForUser } from '../config/fetchVenues';
 import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
@@ -71,14 +72,7 @@ export default function TasksScreen() {
   const fetchData = useCallback(async () => {
     if (!user) return;
     try {
-      let venuesData: Venue[] = [];
-      if (user.role === 'owner') {
-        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
-        venuesData = (data || []) as Venue[];
-      } else {
-        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
-        venuesData = (data || []) as Venue[];
-      }
+      const venuesData = await fetchVenuesForUser(user.uid, user.role) as Venue[];
       
       setVenues(venuesData);
       if (venuesData.length > 0 && !activeVenue) setActiveVenue(venuesData[0].id);

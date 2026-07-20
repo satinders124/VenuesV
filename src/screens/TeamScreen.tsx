@@ -64,13 +64,26 @@ export default function TeamScreen() {
   const fetchData = useCallback(async () => {
     if (!user) return;
     try {
+      // RLS now handles filtering: select * returns owned + assigned venues.
+      // Fallback to explicit queries if RLS not yet migrated in prod.
       let vList: Venue[] = [];
-      if (user.role === 'owner') {
-        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
-        vList = (data || []) as Venue[];
+      const { data: allVenues, error: allError } = await supabase.from('venues').select('*');
+      if (!allError && allVenues && allVenues.length > 0) {
+        vList = allVenues as Venue[];
       } else {
-        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
-        vList = (data || []) as Venue[];
+        // Fallback for environments where RLS still requires filters
+        if (user.role === 'owner') {
+          const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
+          vList = (data || []) as Venue[];
+        } else {
+          const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
+          vList = (data || []) as Venue[];
+          if (vList.length === 0) {
+            // Last resort: plain select with RLS will work after migration 20260722
+            const { data: fallback } = await supabase.from('venues').select('*');
+            vList = (fallback || []) as Venue[];
+          }
+        }
       }
       
       setVenues(vList);
@@ -121,14 +134,15 @@ export default function TeamScreen() {
           ? `${name} has been assigned to ${venueName}.`
           : `${name} will receive an invitation email to set their password.`
       );
-      await fetchAllMembers(venues);
+      // Refresh venues + members – assignedUids changed server-side
+      await fetchData();
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to invite team member.');
     }
     setInviting(false);
   };
 
-  const removeMember = (m:Member, fromVenueName?: string) => {
+  const removeMember = (m:Member, fromVenueName?: string, fromVenueId?: string) => {
     const targetVenue = fromVenueName || m.venue;
     Alert.alert('Remove Member',`Remove ${m.name} from ${targetVenue}?`,[
       {text:'Cancel',style:'cancel'},
@@ -136,10 +150,14 @@ export default function TeamScreen() {
         setRemoving(true);
         try {
           const docId = m.uid || m.id;
-          const venueForRemoval = venues.find((venue) => venue.name === targetVenue);
-          if (!venueForRemoval) throw new Error('Venue not found.');
+          // Prefer ID lookup (robust against duplicate venue names)
+          let venueForRemoval = fromVenueId ? venues.find(v => v.id === fromVenueId) : undefined;
+          if (!venueForRemoval) {
+            venueForRemoval = venues.find((venue) => venue.name === targetVenue) || venues.find(v => v.id === targetVenue);
+          }
+          if (!venueForRemoval) throw new Error('Venue not found. Refresh and try again.');
           await removeTeamMember({ targetUid: docId, venueId: venueForRemoval.id });
-          await fetchAllMembers(venues);
+          await fetchData();
         } catch (err: any) {
           Alert.alert('Error', err.message || 'Failed to remove team member.');
         }
@@ -269,10 +287,13 @@ export default function TeamScreen() {
                       'Remove from which venue?',
                       `${m.name} is assigned to multiple venues.`,
                       [
-                        ...m.venues.filter(v => myVenueNames.includes(v)).map(vName => ({
-                          text: vName,
-                          onPress: () => removeMember(m, vName),
-                        })),
+                        ...m.venues.filter(v => myVenueNames.includes(v)).map(vName => {
+                          const vObj = venues.find(v => v.name === vName);
+                          return {
+                            text: vName,
+                            onPress: () => removeMember(m, vName, vObj?.id),
+                          };
+                        }),
                         {text:'Cancel', style:'cancel' as const},
                       ]
                     );

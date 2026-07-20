@@ -4,6 +4,7 @@ import {
   TouchableOpacity, ActivityIndicator, TextInput
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { fetchVenuesForUser } from '../config/fetchVenues';
 import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
@@ -46,14 +47,7 @@ export default function ReportsScreen() {
   const fetchData = useCallback(async () => {
     if (!user) return;
     try {
-      let vList: Venue[] = [];
-      if (user.role === 'owner') {
-        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
-        vList = (data || []) as Venue[];
-      } else {
-        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
-        vList = (data || []) as Venue[];
-      }
+      const vList = await fetchVenuesForUser(user.uid, user.role) as Venue[];
       
       setVenues(vList);
       

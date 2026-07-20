@@ -4,6 +4,7 @@ import {
   TouchableOpacity, ActivityIndicator, RefreshControl
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { fetchVenuesForUser } from '../config/fetchVenues';
 import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
@@ -44,14 +45,7 @@ export default function DashboardScreen() {
     if (!user) return;
     
     try {
-      let venuesData: Venue[] = [];
-      if (user.role === 'owner') {
-        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
-        venuesData = (data || []) as Venue[];
-      } else {
-        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
-        venuesData = (data || []) as Venue[];
-      }
+      const venuesData = await fetchVenuesForUser(user.uid, user.role) as Venue[];
       
       setVenues(venuesData);
       

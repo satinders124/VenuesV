@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { supabase } from '../config/supabase';
 import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from './AuthContext';
+import { fetchVenuesForUser } from '../config/fetchVenues';
 
 type RoomUnread = { count: number; lastText: string; lastTime: any; };
 
@@ -91,15 +92,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
   const fetchVenuesAndMembers = useCallback(async () => {
     if (!user) return;
     try {
-      let vList: any[] = [];
-      if (user.role === 'owner') {
-        const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
-        vList = data || [];
-      } else {
-        const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
-        vList = data || [];
-      }
-      
+      const vList = await fetchVenuesForUser(user.uid, user.role);
       setVenues(vList);
       const mList = await fetchMembers(vList);
       setMembers(mList);

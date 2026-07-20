@@ -42,21 +42,39 @@ export default function AddVenueScreen() {
   const [managerExistingVenueId, setManagerExistingVenueId] = useState<string|null>(null);
 
   useEffect(() => {
-    if (user?.role !== 'manager' || !user?.venue) return;
+    if (user?.role !== 'manager') return;
     (async () => {
       setResolvingOwner(true);
       try {
-        const myVenueName = user.venue;
-        const { data, error } = await supabase
+        // Robust: find any venue where manager is assigned - no name matching
+        const { data: assignedVenues } = await supabase
           .from('venues')
           .select('ownerId, id')
-          .eq('name', myVenueName)
-          .limit(1)
-          .single();
+          .contains('assignedUids', [user.uid])
+          .limit(1);
 
-        if (data) {
-          setManagerOwnerId(data.ownerId || null);
-          setManagerExistingVenueId(data.id);
+        let venueData = assignedVenues?.[0] || null;
+
+        // Fallback: try plain select (RLS will return assigned venues after migration 20260722)
+        if (!venueData) {
+          const { data: all } = await supabase.from('venues').select('ownerId, id').limit(1);
+          venueData = all?.[0] || null;
+        }
+
+        // Legacy fallback: name match (for old accounts)
+        if (!venueData && user?.venue) {
+          const { data } = await supabase
+            .from('venues')
+            .select('ownerId, id')
+            .eq('name', user.venue)
+            .limit(1)
+            .maybeSingle();
+          venueData = data || null;
+        }
+
+        if (venueData) {
+          setManagerOwnerId(venueData.ownerId || null);
+          setManagerExistingVenueId(venueData.id);
         }
       } catch (err) {
         console.log('Could not resolve manager owner:', err);
@@ -122,18 +140,16 @@ New weekly total: $${newWeekly} AUD
 
     setSaving(true);
     try {
+      // NOTE: venues table only has name, suburb, type, score, ownerId, assignedUids, createdAt
+      // Do NOT send existingVenueId - column does not exist and will crash insert
       const venuePayload: any = {
-        name,
-        suburb,
+        name: name.trim(),
+        suburb: suburb.trim(),
         type,
         score: 100,
         ownerId: isManager ? managerOwnerId : user?.uid,
         assignedUids: isManager && user?.uid ? [user.uid] : [],
       };
-      
-      if (isManager) {
-        venuePayload.existingVenueId = managerExistingVenueId;
-      }
 
       // Insert the venue
       const { data: venueData, error: venueError } = await supabase

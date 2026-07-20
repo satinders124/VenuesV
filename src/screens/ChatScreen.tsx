@@ -5,6 +5,7 @@ import {
   Platform, ActivityIndicator, RefreshControl
 } from 'react-native';
 import { supabase } from '../config/supabase';
+import { fetchVenuesForUser } from '../config/fetchVenues';
 import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { useUnread } from '../context/UnreadContext';
@@ -77,19 +78,13 @@ export default function ChatScreen() {
 
     const fetchVenues = async () => {
       try {
-        let v: Venue[] = [];
-        if (user.role === 'owner') {
-          const { data } = await supabase.from('venues').select('*').eq('ownerId', user.uid);
-          v = (data || []) as Venue[];
-        } else {
-          const { data } = await supabase.from('venues').select('*').contains('assignedUids', [user.uid]);
-          v = (data || []) as Venue[];
-        }
+        const v = await fetchVenuesForUser(user.uid, user.role) as Venue[];
         setVenues(v);
         setLoading(false);
         fetchAllMembers(v);
       } catch(err) {
         console.log(err);
+        setLoading(false);
       }
     };
     
