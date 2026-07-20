@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Radius } from '../theme/tokens';
+const TRIAL_LIMIT = 2;
 
 export default function MoreScreen() {
   const { user, logout, isLocked, trialDaysLeft } = useAuth();
@@ -24,7 +25,7 @@ export default function MoreScreen() {
     { icon:'people-outline' as const, label:'Team OS', desc:`${user?.venueCount||1} venues • Manage managers, cleaners, staff`, color: Colors.blue, screen:'Team' },
     { icon:'bar-chart-outline' as const, label:'Reports & Analytics', desc:'Weekly ops reports, completion, issues', color: Colors.brand, screen:'Reports' },
     { icon:'add-circle-outline' as const, label:'Add Venue', desc:'New venue → auto zones + tasks', color: '#a855f7', screen:'AddVenue' },
-    { icon:'shield-checkmark-outline' as const, label:'Billing & Subscription', desc: isLocked? 'Trial ended – action required' : user?.subscriptionStatus==='active' ? `$${((user?.venueCount||1)*19.95).toFixed(2)}/week • ${user?.venueCount||1} venues` : `${trialDaysLeft||14} days trial left`, color: isLocked? Colors.red : Colors.amber, screen:'Billing' },
+    { icon:'shield-checkmark-outline' as const, label:'Billing & Subscription', desc: isLocked? 'Trial ended – action required' : user?.subscriptionStatus==='active' ? `Active • ${user?.venueCount||1} venues • Web manages billing` : `${trialDaysLeft||14}d trial • ${2} venues max • Web OS`, color: isLocked? Colors.red : Colors.amber, screen:'Billing' },
   ];
   const MANAGER_MENU = [
     { icon:'people-outline' as const, label:'Team', desc:'View your venue team', color: Colors.blue, screen:'Team' },
@@ -93,11 +94,11 @@ export default function MoreScreen() {
                 </>
               )}
               <View style={s.billingRow}>
-                <View style={s.billingItem}><Text style={s.billingVal}>${((user?.venueCount||1)*19.95).toFixed(2)}</Text><Text style={s.billingLabel}>/week</Text></View>
+                <View style={s.billingItem}><Text style={s.billingVal}>{user?.venueCount||1}</Text><Text style={s.billingLabel}>venues active</Text></View>
                 <View style={s.dividerV}/>
-                <View style={s.billingItem}><Text style={s.billingVal}>{user?.venueCount||1}</Text><Text style={s.billingLabel}>venues</Text></View>
+                <View style={s.billingItem}><Text style={s.billingVal}>{TRIAL_LIMIT}</Text><Text style={s.billingLabel}>trial max</Text></View>
                 <View style={s.dividerV}/>
-                <View style={s.billingItem}><Text style={s.billingVal}>$19.95</Text><Text style={s.billingLabel}>per venue</Text></View>
+                <View style={s.billingItem}><Text style={s.billingVal}>Web</Text><Text style={s.billingLabel}>billing OS</Text></View>
               </View>
               <TouchableOpacity style={[s.trialBtn, isLocked?{backgroundColor: Colors.red}: user?.subscriptionStatus==='active'?{backgroundColor: Colors.surfaceRaised, borderWidth:1, borderColor: Colors.border}: {backgroundColor: Colors.brand}]} onPress={()=>{ setBillingModalOpen(false); Linking.openURL('https://venuesv.com/subscribe'); }}>
                 <Text style={[s.trialBtnText, {color: user?.subscriptionStatus==='active'? Colors.text : isLocked? '#fff' : Colors.black}]}>{user?.subscriptionStatus==='active'?'Manage in Stripe →':isLocked?'Subscribe Now →':'View Billing →'}</Text>
@@ -168,9 +169,11 @@ export default function MoreScreen() {
               </View>
               {user?.subscriptionStatus!=='active'&&!isLocked&&<><View style={s.progressTrack}><View style={[s.progressFill,{width:`${100-trialProgress}%`}]} /></View><Text style={s.progressText}>Trial progress {trialProgress}% • Started {user?.trialEndsAt? new Date(Date.now() - (14-(trialDaysLeft||0))*86400000).toLocaleDateString('en-AU') : 'recently'}</Text></>}
               <View style={s.billingRow}>
-                <View style={s.billingItem}><Text style={s.billingVal}>${((user?.venueCount||1)*19.95).toFixed(2)}</Text><Text style={s.billingLabel}>AUD / week</Text></View>
+                <View style={s.billingItem}><Text style={s.billingVal}>{user?.venueCount||1}</Text><Text style={s.billingLabel}>venues</Text></View>
                 <View style={s.dividerV}/>
-                <View style={s.billingItem}><Text style={s.billingVal}>{user?.venueCount||1}</Text><Text style={s.billingLabel}>venues × $19.95</Text></View>
+                <View style={s.billingItem}><Text style={s.billingVal}>{TRIAL_LIMIT}</Text><Text style={s.billingLabel}>trial limit</Text></View>
+                <View style={s.dividerV}/>
+                <View style={s.billingItem}><Text style={s.billingVal}>Web</Text><Text style={s.billingLabel}>manages $</Text></View>
               </View>
             </View>
             <View style={{gap:8, marginTop:12}}>
@@ -179,7 +182,7 @@ export default function MoreScreen() {
               <View style={s.featureRow}><Ionicons name="checkmark-circle" size={14} color={Colors.brand}/><Text style={s.featureText}>Cancel anytime • No per-user fees • Stripe secure</Text></View>
             </View>
             <TouchableOpacity style={[s.trialBtn, {marginTop:16, backgroundColor: isLocked?Colors.red:Colors.brand}]} onPress={()=>{ setBillingModalOpen(false); Linking.openURL('https://venuesv.com/subscribe'); }}>
-              <Text style={[s.trialBtnText,{color: isLocked?'#fff':Colors.black}]}>{user?.subscriptionStatus==='active'?'Manage in Stripe Portal →':'Subscribe – $19.95/venue/week →'}</Text>
+              <Text style={[s.trialBtnText,{color: isLocked?'#fff':Colors.black}]}>{user?.subscriptionStatus==='active'?'Manage Venues & Billing on Web →':'Subscribe on Web Dashboard →'}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[s.cancelBtn,{marginTop:10}]} onPress={()=>setBillingModalOpen(false)}><Text style={s.cancelText}>Close</Text></TouchableOpacity>
           </View>
