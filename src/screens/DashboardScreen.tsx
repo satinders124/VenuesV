@@ -59,6 +59,14 @@ export default function DashboardScreen() {
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [fetchData]);
+  useEffect(() => {
+    const unsub = navigation.addListener('focus', () => {
+      fetchData();
+    });
+    return unsub;
+  }, [navigation, fetchData]);
+
+
 
   const openIssues = issues.filter(i=>i.status!=='resolved');
   const highIssues = openIssues.filter(i=>i.priority==='high');
@@ -68,15 +76,18 @@ export default function DashboardScreen() {
   const completion = venues.length ? Math.round(venues.reduce((acc,v)=>acc+(v.score||0),0)/venues.length) : 100;
 
   const aiInsight = (() => {
+    if (venues.length===0) {
+      if (user?.role !== 'owner') {
+        return { type: 'warning' as const, title: 'No venues assigned', msg: 'You have been removed from all venues or have no active assignments. Contact your owner/manager to be re-added. Your account is still active.', action: 'Contact Owner', nav: 'Chat' };
+      }
+      return { type: 'info' as const, title: 'Welcome to VenuesV OS', msg: 'Add your first venue to activate your ops command center. We will auto-create zones and daily tasks.', action: 'Add Venue', nav: 'AddVenue' };
+    }
     if (highIssues.length > 0) {
       const v = venues.find(x=>x.id===highIssues[0].venueId);
       return { type: 'warning' as const, title: `${highIssues.length} high priority issue${highIssues.length>1?'s':''} need action`, msg: `${v?.name || 'A venue'} has ${highIssues.length} critical issue${highIssues.length>1?'s':''}. Review and assign now to keep ops clean.`, action: 'Review Issues', nav: 'Issues' };
     }
     if (openIssues.length > 3) {
       return { type: 'info' as const, title: 'Ops load rising', msg: `${openIssues.length} open issues across ${venuesWithIssues.length} venues. Consider rebalancing cleaners.`, action: 'View Team', nav: 'Team' };
-    }
-    if (venues.length===0) {
-      return { type: 'info' as const, title: 'Welcome to VenuesV OS', msg: 'Add your first venue to activate your ops command center. We will auto-create zones and daily tasks.', action: 'Add Venue', nav: 'AddVenue' };
     }
     return { type: 'success' as const, title: `Ops health ${completion}% – all clear`, msg: `No critical issues. ${managers.length} managers and ${staff.length} staff are active across ${venues.length} venue${venues.length>1?'s':''}.`, action: 'View Reports', nav: 'Reports' };
   })();
@@ -121,13 +132,20 @@ export default function DashboardScreen() {
           </View>
         </View>
 
-        {/* METRICS */}
-        <View style={s.metrics}>
-          <MetricCard icon="business-outline" iconColor={Colors.brand} value={venues.length} label="Venues" trend={venues.length>1?`${venues.length} active`:undefined} trendUp />
-          <MetricCard icon="warning-outline" iconColor={openIssues.length?Colors.red:Colors.brand} value={openIssues.length} label="Open Issues" trend={highIssues.length?`${highIssues.length} high`: 'All clear'} trendUp={highIssues.length===0} />
-          <MetricCard icon="person-outline" iconColor={Colors.blue} value={managers.length} label="Managers" />
-          <MetricCard icon="people-outline" iconColor={Colors.textSecondary} value={staff.length} label="Staff & Cleaners" />
-        </View>
+        {/* REMOVED EMPTY STATE FOR NON-OWNERS */}
+        {venues.length===0 && user?.role!=='owner' && (
+          <EmptyState icon="lock-closed-outline" title="Removed from venues" subtitle="You are no longer assigned to any venue. Your account is still active – ask your owner or site manager to re-add you to a venue to regain access." />
+        )}
+
+        {/* METRICS - hide if no venues and not owner to avoid confusion */}
+        {!(venues.length===0 && user?.role!=='owner') && (
+          <View style={s.metrics}>
+            <MetricCard icon="business-outline" iconColor={Colors.brand} value={venues.length} label="Venues" trend={venues.length>1?`${venues.length} active`:undefined} trendUp />
+            <MetricCard icon="warning-outline" iconColor={openIssues.length?Colors.red:Colors.brand} value={openIssues.length} label="Open Issues" trend={highIssues.length?`${highIssues.length} high`: 'All clear'} trendUp={highIssues.length===0} />
+            <MetricCard icon="person-outline" iconColor={Colors.blue} value={managers.length} label="Managers" />
+            <MetricCard icon="people-outline" iconColor={Colors.textSecondary} value={staff.length} label="Staff & Cleaners" />
+          </View>
+        )}
 
         {/* AI INSIGHT */}
         <AIInsightCard title={aiInsight.title} message={aiInsight.msg} actionLabel={aiInsight.action} type={aiInsight.type} onAction={()=>navigation.navigate(aiInsight.nav)} />

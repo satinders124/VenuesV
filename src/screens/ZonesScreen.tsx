@@ -90,6 +90,14 @@ export default function ZonesScreen() {
 
     return () => { supabase.removeChannel(channel); };
   }, [fetchData]);
+  useEffect(() => {
+    const unsub = navigation.addListener('focus', () => {
+      fetchData();
+    });
+    return unsub;
+  }, [navigation, fetchData]);
+
+
 
   const updateStatus = async (id: string, status: ZoneStatus) => {
     await supabase.from('zones').update({ status }).eq('id', id);

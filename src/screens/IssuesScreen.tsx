@@ -124,6 +124,14 @@ export default function IssuesScreen() {
 
     return () => { supabase.removeChannel(channel); };
   }, [fetchData]);
+  useEffect(() => {
+    const unsub = navigation.addListener('focus', () => {
+      fetchData();
+    });
+    return unsub;
+  }, [navigation, fetchData]);
+
+
 
   const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||venueId;
 

@@ -194,6 +194,14 @@ export default function OverviewScreen() {
 
     return () => { supabase.removeChannel(channel); };
   }, [fetchData]);
+  useEffect(() => {
+    const unsub = navigation.addListener('focus', () => {
+      fetchData();
+    });
+    return unsub;
+  }, [navigation, fetchData]);
+
+
 
   const vStats = (v:Venue) => {
     const vT = tasks.filter(t=>t.venueId===v.id);

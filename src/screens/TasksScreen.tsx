@@ -111,6 +111,14 @@ export default function TasksScreen() {
 
     return () => { supabase.removeChannel(channel); };
   }, [fetchData]);
+  useEffect(() => {
+    const unsub = navigation.addListener('focus', () => {
+      fetchData();
+    });
+    return unsub;
+  }, [navigation, fetchData]);
+
+
 
   const completeTask   = async (id:string) => {
     await supabase.from('tasks').update({ done: true }).eq('id', id);

@@ -68,6 +68,14 @@ export default function TeamScreen() {
 
   const onRefresh = () => { setRefreshing(true); fetchData(); };
   useEffect(()=>{ fetchData(); const ch=supabase.channel('team_os').on('postgres_changes',{event:'*',schema:'public',table:'venues'},fetchData).subscribe(); return ()=>{supabase.removeChannel(ch);}; },[fetchData]);
+  useEffect(() => {
+    const unsub = navigation.addListener('focus', () => {
+      fetchData();
+    });
+    return unsub;
+  }, [navigation, fetchData]);
+
+
 
   const openInvite = () => { setRole(activeTab); setName(''); setEmail(''); setVenueSearch(''); setModal(true); };
   const inviteMember = async () => {

@@ -90,6 +90,14 @@ export default function ReportsScreen() {
 
     return () => { supabase.removeChannel(channel); };
   }, [fetchData]);
+  useEffect(() => {
+    const unsub = navigation.addListener('focus', () => {
+      fetchData();
+    });
+    return unsub;
+  }, [navigation, fetchData]);
+
+
 
   const generatePDF = async (venue: Venue) => {
     setGenerating(venue.id);
