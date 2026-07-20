@@ -11,6 +11,9 @@ import { deleteVenue as deleteVenueApi } from '../config/venueApi';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { Colors } from '../theme/tokens';
+import AIInsightCard from '../components/ui/AIInsightCard';
+import { useAIInsight } from '../hooks/useAIInsight';
 import { RefreshControl } from 'react-native';
 
 type Venue  = { id:string; name:string; suburb:string; score:number; ownerId?:string; assignedUids?:string[]; };
@@ -56,6 +59,7 @@ export default function OverviewScreen() {
   const [loading, setLoading] = useState(true);
   const [search,  setSearch]  = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const { insight: aiInsight } = useAIInsight('overview', undefined, [venues.length]);
 
   const [selVenue,  setSelVenue]  = useState<Venue|null>(null);
   const [activeTab, setActiveTab] = useState<'details'|'zones'|'team'>('details');
@@ -332,6 +336,8 @@ export default function OverviewScreen() {
             <Text style={s.summaryLabel}>Team</Text>
           </View>
         </View>
+
+        {aiInsight && <View style={{marginBottom:12}}><AIInsightCard title={aiInsight.title} message={aiInsight.message} actionLabel={aiInsight.actionLabel} type={aiInsight.type} /></View>}
 
         <View style={s.searchBar}>
           <Ionicons name="search" size={16} color="#6e7a8a"/>

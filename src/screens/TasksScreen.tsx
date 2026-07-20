@@ -9,6 +9,9 @@ import { fetchVenuesForUser } from '../config/fetchVenues';
 import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
+import { Colors } from '../theme/tokens';
+import AIInsightCard from '../components/ui/AIInsightCard';
+import { useAIInsight } from '../hooks/useAIInsight';
 import { useNavigation } from '@react-navigation/native';
 import { notifyTaskCreated } from '../config/notifications';
 import { RefreshControl } from 'react-native';
@@ -54,6 +57,7 @@ export default function TasksScreen() {
   const isManager = user?.role === 'manager';
   const isCleaner = user?.role === 'cleaner';
   const [refreshing, setRefreshing] = useState(false);
+  const { insight: aiInsight } = useAIInsight('tasks', undefined, [venues.length]);
 
   const [venues,      setVenues]     = useState<Venue[]>([]);
   const [tasks,       setTasks]      = useState<Task[]>([]);
@@ -192,6 +196,8 @@ export default function TasksScreen() {
 
   const Header = (
     <View>
+      {aiInsight && <View style={{paddingHorizontal:20, marginBottom:12}}><AIInsightCard title={aiInsight.title} message={aiInsight.message} actionLabel={aiInsight.actionLabel} type={aiInsight.type} /></View>}
+
       {/* Venue tabs */}
       {venues.length > 1 && (
         <ScrollView ref={venueScrollRef} horizontal showsHorizontalScrollIndicator={false}

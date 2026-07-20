@@ -10,6 +10,9 @@ import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { useUnread } from '../context/UnreadContext';
 import { Ionicons } from '@expo/vector-icons';
+import { Colors } from '../theme/tokens';
+import AIInsightCard from '../components/ui/AIInsightCard';
+import { useAIInsight } from '../hooks/useAIInsight';
 import { notifyChatMessage } from '../config/notifications';
 
 type Message  = { id:string; text:string; senderName:string; senderRole:string; createdAt:any; };

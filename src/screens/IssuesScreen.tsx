@@ -11,6 +11,9 @@ import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
+import { Colors, Radius } from '../theme/tokens';
+import AIInsightCard from '../components/ui/AIInsightCard';
+import { useAIInsight } from '../hooks/useAIInsight';
 import { useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { RefreshControl } from 'react-native';
@@ -83,6 +86,7 @@ export default function IssuesScreen() {
   const [viewerPhotos,    setViewerPhotos]    = useState<string[]>([]);
   const [viewerIndex,     setViewerIndex]     = useState(0);
   const [downloading,     setDownloading]     = useState(false);
+  const { insight: aiInsight } = useAIInsight('issues', selectedVenue !== 'all' ? selectedVenue : undefined, [issues.length]);
 
   const fetchData = useCallback(async () => {
     if (!user) return;

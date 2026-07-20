@@ -11,6 +11,7 @@ import MetricCard from '../components/ui/MetricCard';
 import AIInsightCard from '../components/ui/AIInsightCard';
 import ActionCard from '../components/ui/ActionCard';
 import SectionHeader from '../components/ui/SectionHeader';
+import { useAIInsight } from '../hooks/useAIInsight';
 import EmptyState from '../components/ui/EmptyState';
 
 type Venue = { id:string; name:string; suburb:string; score:number; ownerId?:string; assignedUids?:string[]; };
@@ -75,21 +76,19 @@ export default function DashboardScreen() {
   const venuesWithIssues = venues.filter(v=> openIssues.some(i=>i.venueId===v.id));
   const completion = venues.length ? Math.round(venues.reduce((acc,v)=>acc+(v.score||0),0)/venues.length) : 100;
 
-  const aiInsight = (() => {
+  const { insight: aiRemote, loading: aiLoading } = useAIInsight('dashboard', undefined, [venues.length, issues.length]);
+  const aiInsight = aiRemote || (() => {
     if (venues.length===0) {
       if (user?.role !== 'owner') {
-        return { type: 'warning' as const, title: 'No venues assigned', msg: 'You have been removed from all venues or have no active assignments. Contact your owner/manager to be re-added. Your account is still active.', action: 'Contact Owner', nav: 'Chat' };
+        return { type: 'warning' as const, title: 'No venues assigned', message: 'You have been removed from all venues or have no active assignments. Contact your owner/manager to be re-added.', actionLabel: 'Contact Owner', nav: 'Chat' };
       }
-      return { type: 'info' as const, title: 'Welcome to VenuesV OS', msg: 'Add your first venue to activate your ops command center. We will auto-create zones and daily tasks.', action: 'Add Venue', nav: 'AddVenue' };
+      return { type: 'info' as const, title: 'Welcome to VenuesV OS', message: 'Add your first venue to activate your ops command center.', actionLabel: 'Add Venue', nav: 'AddVenue' };
     }
     if (highIssues.length > 0) {
       const v = venues.find(x=>x.id===highIssues[0].venueId);
-      return { type: 'warning' as const, title: `${highIssues.length} high priority issue${highIssues.length>1?'s':''} need action`, msg: `${v?.name || 'A venue'} has ${highIssues.length} critical issue${highIssues.length>1?'s':''}. Review and assign now to keep ops clean.`, action: 'Review Issues', nav: 'Issues' };
+      return { type: 'warning' as const, title: `${highIssues.length} high priority issue${highIssues.length>1?'s':''} need action`, message: `${v?.name || 'A venue'} has ${highIssues.length} critical issue${highIssues.length>1?'s':''}. Review now.`, actionLabel: 'Review Issues', nav: 'Issues' };
     }
-    if (openIssues.length > 3) {
-      return { type: 'info' as const, title: 'Ops load rising', msg: `${openIssues.length} open issues across ${venuesWithIssues.length} venues. Consider rebalancing cleaners.`, action: 'View Team', nav: 'Team' };
-    }
-    return { type: 'success' as const, title: `Ops health ${completion}% – all clear`, msg: `No critical issues. ${managers.length} managers and ${staff.length} staff are active across ${venues.length} venue${venues.length>1?'s':''}.`, action: 'View Reports', nav: 'Reports' };
+    return { type: 'success' as const, title: `Ops health ${completion}% – all clear`, message: `Team active across ${venues.length} venues.`, actionLabel: 'View Reports', nav: 'Reports' };
   })();
 
   if (loading) return (
@@ -148,7 +147,7 @@ export default function DashboardScreen() {
         )}
 
         {/* AI INSIGHT */}
-        <AIInsightCard title={aiInsight.title} message={aiInsight.msg} actionLabel={aiInsight.action} type={aiInsight.type} onAction={()=>navigation.navigate(aiInsight.nav)} />
+        <AIInsightCard title={aiInsight.title} message={aiInsight.message || aiInsight.msg} actionLabel={aiInsight.actionLabel || aiInsight.action} type={aiInsight.type} onAction={()=>navigation.navigate(aiInsight.actionScreen || aiInsight.nav)} />
 
         {/* ACTION CARDS */}
         <SectionHeader title="Ops Actions" subtitle="What needs your attention" />
