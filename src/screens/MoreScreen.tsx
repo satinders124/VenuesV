@@ -1,278 +1,204 @@
 import React, { useState } from 'react';
-import {
-  View, Text, StyleSheet, SafeAreaView,
-  TouchableOpacity, ScrollView, Alert, Modal,
-  TextInput, ActivityIndicator, KeyboardAvoidingView, Platform
-} from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, ScrollView, Alert, Modal, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Linking } from 'react-native';
 import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
-import { Linking } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-
-const OWNER_MENU = [
-  { icon:'people-outline',    label:'Team',     desc:'Manage site managers, cleaners and staff', color:'#2c7ef7', screen:'Team'     },
-  { icon:'bar-chart-outline', label:'Reports',  desc:'Download weekly reports per venue',         color:'#00c896', screen:'Reports'  },
-  { icon:'add-circle-outline',label:'Add Venue',desc:'Register a new venue',                      color:'#a855f7', screen:'AddVenue' },
-  { icon:'card-outline',      label:'Billing',  desc:'View your subscription and usage',          color:'#f5a623', screen:'Billing'  },
-];
-
-const MANAGER_MENU = [
-  { icon:'people-outline',    label:'Team',     desc:'View your venue team',                      color:'#2c7ef7', screen:'Team'     },
-  { icon:'bar-chart-outline', label:'Reports',  desc:'View venue performance',                    color:'#00c896', screen:'Reports'  },
-  { icon:'add-circle-outline',label:'Add Venue',desc:'Register a new venue',  color:'#a855f7', screen:'AddVenue' }
-];
-
-const CLEANER_MENU = [
-  { icon:'help-circle-outline', label:'Help',    desc:'How to use Venues V',                      color:'#2c7ef7', screen:null },
-  { icon:'shield-outline',      label:'Privacy', desc:'Data and privacy settings',                color:'#6e7a8a', screen:null },
-];
+import { Colors, Radius } from '../theme/tokens';
 
 export default function MoreScreen() {
   const { user, logout, isLocked, trialDaysLeft } = useAuth();
   const navigation = useNavigation<any>();
-
-  const [pwdModalOpen,     setPwdModalOpen]     = useState(false);
+  const [pwdModalOpen, setPwdModalOpen] = useState(false);
   const [billingModalOpen, setBillingModalOpen] = useState(false);
-  const [currentPwd, setCurrentPwd]     = useState('');
-  const [newPwd, setNewPwd]             = useState('');
-  const [confirmPwd, setConfirmPwd]     = useState('');
-  const [changing, setChanging]         = useState(false);
+  const [newPwd, setNewPwd] = useState('');
+  const [confirmPwd, setConfirmPwd] = useState('');
+  const [changing, setChanging] = useState(false);
 
-  const isOwner   = user?.role === 'owner';
-  const isManager = user?.role === 'manager';
-  const isWorker  = user?.role === 'cleaner' || user?.role === 'staff';
+  const isOwner = user?.role === 'owner';
+  const ROLE_COLOR: Record<string,string> = { owner: Colors.amber, manager: Colors.blue, cleaner: Colors.brand, staff: '#a855f7' };
+  const ROLE_LABEL: Record<string,string> = { owner:'Owner', manager:'Site Manager', cleaner:'Cleaner', staff:'Staff' };
+  const roleColor = ROLE_COLOR[user?.role||'cleaner'] || Colors.brand;
 
-  const MENU_ITEMS = isOwner ? OWNER_MENU : isManager ? MANAGER_MENU : CLEANER_MENU;
+  const OWNER_MENU = [
+    { icon:'people-outline' as const, label:'Team OS', desc:`${user?.venueCount||1} venues • Manage managers, cleaners, staff`, color: Colors.blue, screen:'Team' },
+    { icon:'bar-chart-outline' as const, label:'Reports & Analytics', desc:'Weekly ops reports, completion, issues', color: Colors.brand, screen:'Reports' },
+    { icon:'add-circle-outline' as const, label:'Add Venue', desc:'New venue → auto zones + tasks', color: '#a855f7', screen:'AddVenue' },
+    { icon:'shield-checkmark-outline' as const, label:'Billing & Subscription', desc: isLocked? 'Trial ended – action required' : user?.subscriptionStatus==='active' ? `$${((user?.venueCount||1)*19.95).toFixed(2)}/week • ${user?.venueCount||1} venues` : `${trialDaysLeft||14} days trial left`, color: isLocked? Colors.red : Colors.amber, screen:'Billing' },
+  ];
+  const MANAGER_MENU = [
+    { icon:'people-outline' as const, label:'Team', desc:'View your venue team', color: Colors.blue, screen:'Team' },
+    { icon:'bar-chart-outline' as const, label:'Reports', desc:'Venue performance', color: Colors.brand, screen:'Reports' },
+    { icon:'add-circle-outline' as const, label:'Add Venue', desc:'Register new venue for your owner', color: '#a855f7', screen:'AddVenue' },
+  ];
+  const WORKER_MENU = [
+    { icon:'help-circle-outline' as const, label:'How Ops Works', desc:'Tasks auto-reset daily, photo proof required', color: Colors.blue, screen:null },
+    { icon:'shield-outline' as const, label:'Privacy & Security', desc:'RLS isolated • Your data is private', color: Colors.textMuted, screen:null },
+  ];
+  const MENU_ITEMS = isOwner ? OWNER_MENU : user?.role==='manager' ? MANAGER_MENU : WORKER_MENU;
 
-  const ROLE_COLOR: Record<string,string> = {
-    owner:'#f5a623', manager:'#2c7ef7', cleaner:'#00c896', staff:'#a855f7',
-  };
+  const trialProgress = (() => {
+    if (!trialDaysLeft && trialDaysLeft!==0) return 100;
+    return Math.max(0, Math.min(100, Math.round(((14 - (trialDaysLeft||0))/14)*100)));
+  })();
 
-  const ROLE_LABEL: Record<string,string> = {
-    owner:'Owner', manager:'Site Manager', cleaner:'Cleaner', staff:'Staff',
-  };
-
-  const roleColor = ROLE_COLOR[user?.role||'cleaner'] || '#00c896';
-
-  const openPasswordModal = () => {
-    setCurrentPwd(''); setNewPwd(''); setConfirmPwd('');
-    setPwdModalOpen(true);
-  };
-
-  const handleChangePassword = async () => {
-    if (!newPwd || !confirmPwd) {
-      Alert.alert('Missing fields', 'Please fill in the new password fields.');
-      return;
-    }
-    if (newPwd.length < 6) {
-      Alert.alert('Password too short', 'New password must be at least 6 characters.');
-      return;
-    }
-    if (newPwd !== confirmPwd) {
-      Alert.alert('Passwords don\'t match', 'New password and confirmation must match.');
-      return;
-    }
-
+  const openPwd = () => { setNewPwd(''); setConfirmPwd(''); setPwdModalOpen(true); };
+  const handlePwd = async () => {
+    if (!newPwd||!confirmPwd){ Alert.alert('Missing','Fill both fields'); return; }
+    if (newPwd.length<6){ Alert.alert('Too short','Min 6 chars'); return; }
+    if (newPwd!==confirmPwd){ Alert.alert('Mismatch','Passwords must match'); return; }
     setChanging(true);
-    try {
-      const { error } = await supabase.auth.updateUser({
-        password: newPwd
-      });
-
-      if (error) throw error;
-
-      setPwdModalOpen(false);
-      Alert.alert('✅ Password Changed', 'Your password has been updated successfully.');
-    } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to change password.');
-    }
-    setChanging(false);
+    try { const {error}=await supabase.auth.updateUser({password:newPwd}); if(error) throw error; setPwdModalOpen(false); Alert.alert('✅ Password Changed'); }
+    catch(e:any){ Alert.alert('Error', e.message||'Failed'); } finally { setChanging(false); }
   };
 
   return (
     <SafeAreaView style={s.container}>
       <ScrollView contentContainerStyle={s.scroll}>
-
         <View style={s.header}>
-          <Text style={s.heading}>More</Text>
+          <Text style={s.heading}>Account OS</Text>
+          <Text style={s.sub}>Profile, billing, team & security</Text>
         </View>
 
-        {/* User card */}
-        <View style={s.userCard}>
-          <View style={[s.avatar, { backgroundColor: roleColor+'33' }]}>
-            <Text style={[s.avatarText, { color: roleColor }]}>
-              {(user?.name || user?.email || 'User').split(' ').map((n:string) => n[0]).join('').slice(0,2)}
-            </Text>
+        {/* USER HERO */}
+        <View style={s.heroCard}>
+          <View style={s.heroTop}>
+            <View style={[s.avatar,{backgroundColor: roleColor+'20', borderColor: roleColor+'30'}]}>
+              <Text style={[s.avatarText,{color: roleColor}]}>{(user?.name||user?.email||'U').split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase()}</Text>
+            </View>
+            <View style={{flex:1, gap:3}}>
+              <View style={{flexDirection:'row', alignItems:'center', gap:8}}><Text style={s.userName}>{user?.name||'User'}</Text><View style={[s.verifiedBadge]}><Ionicons name="checkmark-circle" size={12} color={Colors.brand}/><Text style={s.verifiedText}>Verified</Text></View></View>
+              <Text style={s.userEmail}>{user?.email}</Text>
+              <View style={{flexDirection:'row', gap:6, marginTop:4}}>
+                <View style={[s.roleBadge,{backgroundColor: roleColor+'18', borderColor: roleColor+'30'}]}><Text style={[s.roleText,{color: roleColor}]}>{ROLE_LABEL[user?.role||'cleaner']}</Text></View>
+                <View style={[s.roleBadge,{backgroundColor: Colors.surfaceRaised, borderColor: Colors.border}]}><Text style={[s.roleText,{color: Colors.textMuted}]}>{user?.subscriptionStatus==='active'?'Active':isLocked?'Locked':`Trial ${trialDaysLeft||14}d`}</Text></View>
+              </View>
+            </View>
           </View>
-          <View style={s.userInfo}>
-            <Text style={s.userName}>{user?.name || user?.name}</Text>
-            <Text style={s.userEmail}>{user?.email}</Text>
-          </View>
-          <View style={[s.roleBadge, { backgroundColor: roleColor+'22' }]}>
-            <Text style={[s.roleText, { color: roleColor }]}>
-              {ROLE_LABEL[user?.role||'cleaner']}
-            </Text>
+
+          {/* TRIAL / BILLING COMMAND CARD – Premium */}
+          {isOwner && (
+            <View style={[s.trialCard, isLocked?{borderColor: Colors.red+'40', backgroundColor: Colors.redSoft}: user?.subscriptionStatus==='active'?{borderColor: Colors.brand+'30', backgroundColor: Colors.brandSoft}: {borderColor: Colors.amber+'30', backgroundColor: 'rgba(247,184,75,0.08)'}]}>
+              <View style={s.trialHeader}>
+                <View style={{flexDirection:'row', alignItems:'center', gap:8}}>
+                  <View style={[s.trialDot,{backgroundColor: user?.subscriptionStatus==='active'?Colors.brand:isLocked?Colors.red:Colors.amber}]} />
+                  <Text style={s.trialTitle}>{user?.subscriptionStatus==='active'?'Active Subscription':isLocked?'Trial Ended – Action Required':`Free Trial • ${trialDaysLeft||14} days left`}</Text>
+                </View>
+                <Text style={s.trialVenues}>{user?.venueCount||1} venue{(user?.venueCount||1)>1?'s':''}</Text>
+              </View>
+              {user?.subscriptionStatus!=='active' && !isLocked && (
+                <>
+                  <View style={s.progressTrack}><View style={[s.progressFill,{width:`${100-trialProgress}%`, backgroundColor: trialDaysLeft!==null && trialDaysLeft<=3? Colors.amber: Colors.brand}]}/></View>
+                  <Text style={s.progressText}>{14-(trialDaysLeft||0)}/14 days used • {trialDaysLeft||14} remaining</Text>
+                </>
+              )}
+              <View style={s.billingRow}>
+                <View style={s.billingItem}><Text style={s.billingVal}>${((user?.venueCount||1)*19.95).toFixed(2)}</Text><Text style={s.billingLabel}>/week</Text></View>
+                <View style={s.dividerV}/>
+                <View style={s.billingItem}><Text style={s.billingVal}>{user?.venueCount||1}</Text><Text style={s.billingLabel}>venues</Text></View>
+                <View style={s.dividerV}/>
+                <View style={s.billingItem}><Text style={s.billingVal}>$19.95</Text><Text style={s.billingLabel}>per venue</Text></View>
+              </View>
+              <TouchableOpacity style={[s.trialBtn, isLocked?{backgroundColor: Colors.red}: user?.subscriptionStatus==='active'?{backgroundColor: Colors.surfaceRaised, borderWidth:1, borderColor: Colors.border}: {backgroundColor: Colors.brand}]} onPress={()=>{ setBillingModalOpen(false); Linking.openURL('https://venuesv.com/subscribe'); }}>
+                <Text style={[s.trialBtnText, {color: user?.subscriptionStatus==='active'? Colors.text : isLocked? '#fff' : Colors.black}]}>{user?.subscriptionStatus==='active'?'Manage in Stripe →':isLocked?'Subscribe Now →':'View Billing →'}</Text>
+              </TouchableOpacity>
+              <View style={s.secureRow}><Ionicons name="lock-closed-outline" size={12} color={Colors.textMuted}/><Text style={s.secureText}>Stripe secure • Cancel anytime • RLS isolated • No per-user fees</Text></View>
+            </View>
+          )}
+        </View>
+
+        {/* OPS MENU */}
+        <View style={s.section}>
+          <Text style={s.sectionTitle}>Ops Control</Text>
+          <View style={s.menuList}>
+            {MENU_ITEMS.map((item,i)=>(
+              <TouchableOpacity key={item.label} style={[s.menuItem, i===MENU_ITEMS.length-1&&{borderBottomWidth:0}]} onPress={()=>{
+                if (item.screen==='Billing'){ setBillingModalOpen(true); return; }
+                if (item.screen) navigation.navigate(item.screen); else Alert.alert(item.label, item.desc);
+              }}>
+                <View style={[s.menuIcon,{backgroundColor: item.color+'14', borderColor: item.color+'20'}]}><Ionicons name={item.icon} size={18} color={item.color}/></View>
+                <View style={{flex:1, gap:2}}><Text style={s.menuLabel}>{item.label}</Text><Text style={s.menuDesc}>{item.desc}</Text></View>
+                <Ionicons name="chevron-forward" size={14} color={Colors.textMuted}/>
+              </TouchableOpacity>
+            ))}
           </View>
         </View>
 
-        {/* Menu items */}
-        <View style={s.menuList}>
-          {MENU_ITEMS.map((item, i) => (
-            <TouchableOpacity
-              key={item.label}
-              style={[s.menuItem, i === MENU_ITEMS.length - 1 && s.menuItemLast]}
-              onPress={() => {
-                if (item.screen === 'Billing') { setBillingModalOpen(true); return; }
-                if (item.screen) navigation.navigate(item.screen);
-                else Alert.alert(item.label, `${item.label} coming soon!`);
-              }}
-            >
-              <View style={[s.menuIcon, { backgroundColor: item.color + '18' }]}>
-                <Ionicons name={item.icon as any} color={item.color} size={20} />
-              </View>
-              <View style={s.menuText}>
-                <Text style={s.menuLabel}>{item.label}</Text>
-                <Text style={s.menuDesc}>{item.desc}</Text>
-              </View>
-              <Ionicons name="chevron-forward" color="#3a4252" size={16} />
+        {/* SECURITY */}
+        <View style={s.section}>
+          <Text style={s.sectionTitle}>Security & Account</Text>
+          <View style={s.menuList}>
+            <TouchableOpacity style={s.menuItem} onPress={openPwd}>
+              <View style={[s.menuIcon,{backgroundColor: Colors.brandSoft, borderColor: Colors.brand+'20'}]}><Ionicons name="key-outline" size={18} color={Colors.brand}/></View>
+              <View style={{flex:1, gap:2}}><Text style={s.menuLabel}>Change Password</Text><Text style={s.menuDesc}>Update password • Secure Supabase Auth</Text></View>
+              <Ionicons name="chevron-forward" size={14} color={Colors.textMuted}/>
             </TouchableOpacity>
-          ))}
+            <View style={[s.menuItem, {borderBottomWidth:0}]}>
+              <View style={[s.menuIcon,{backgroundColor: Colors.surfaceRaised, borderColor: Colors.border}]}><Ionicons name="shield-checkmark-outline" size={18} color={Colors.textMuted}/></View>
+              <View style={{flex:1, gap:2}}><Text style={s.menuLabel}>Security</Text><Text style={s.menuDesc}>RLS isolated • Stripe PCI compliant • Supabase encrypted</Text></View>
+              <View style={[s.badge,{backgroundColor: Colors.brandSoft}]}><Text style={[s.badgeText,{color: Colors.brand}]}>Secure</Text></View>
+            </View>
+          </View>
         </View>
 
-        {/* Account section */}
-        <View style={s.menuList}>
-          <TouchableOpacity style={[s.menuItem, s.menuItemLast]} onPress={openPasswordModal}>
-            <View style={[s.menuIcon, { backgroundColor: '#00c89618' }]}>
-              <Ionicons name="key-outline" color="#00c896" size={20} />
-            </View>
-            <View style={s.menuText}>
-              <Text style={s.menuLabel}>Change Password</Text>
-              <Text style={s.menuDesc}>Update your account password</Text>
-            </View>
-            <Ionicons name="chevron-forward" color="#3a4252" size={16} />
-          </TouchableOpacity>
-        </View>
+        {/* TRIAL EXPLAINER FOR NON-OWNER */}
+        {!isOwner && (
+          <View style={[s.trialCard,{backgroundColor: Colors.surface, borderColor: Colors.border}]}>
+            <View style={{flexDirection:'row', gap:10, alignItems:'center'}}><View style={[s.trialDot,{backgroundColor: Colors.blue}]} /><Text style={s.trialTitle}>Team Member Access</Text></View>
+            <Text style={[s.progressText,{marginTop:8}]}>You are invited by your owner/manager. You have role-based access to assigned venues only. Billing is handled by owner – no cost to you. Trial status is managed by owner account.</Text>
+          </View>
+        )}
 
-        {/* Logout */}
-        <TouchableOpacity
-          style={s.logoutBtn}
-          onPress={() => Alert.alert('Log Out', 'Are you sure?', [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Log Out', style: 'destructive', onPress: logout },
-          ])}
-        >
-          <Ionicons name="log-out-outline" color="#f24e6e" size={18} />
-          <Text style={s.logoutText}>Log Out</Text>
+        <TouchableOpacity style={s.logoutBtn} onPress={()=> Alert.alert('Log Out','Clear session and cached data?',[{text:'Cancel',style:'cancel'},{text:'Log Out',style:'destructive',onPress: logout}])}>
+          <Ionicons name="log-out-outline" size={16} color={Colors.red}/><Text style={s.logoutText}>Log Out • Clear Cache</Text>
         </TouchableOpacity>
-
-        <Text style={s.version}>Venues V v1.0.0</Text>
-
+        <Text style={s.version}>VenuesV OS v1.0.0 • Supabase • Stripe • Expo • {user?.uid?.slice(0,6) || ''}</Text>
+        <View style={{height:24}}/>
       </ScrollView>
 
-      {/* Billing Modal */}
+      {/* BILLING MODAL – PREMIUM */}
       <Modal visible={billingModalOpen} transparent animationType="slide">
         <View style={s.modalOverlay}>
           <View style={s.modalBox}>
-            <View style={s.modalHeader}>
-              <Text style={s.modalTitle}>Billing & Subscription</Text>
-              <TouchableOpacity onPress={()=>setBillingModalOpen(false)}>
-                <Text style={s.modalClose}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Status row */}
-            <View style={s.billingStatus}>
-              <View style={[s.billingDot, {backgroundColor: user?.subscriptionStatus==='active'?'#00c896':isLocked?'#f24e6e':'#f5a623'}]}/>
-              <Text style={s.billingStatusText}>
-                {user?.subscriptionStatus === 'active'
-                  ? 'Active subscription'
-                  : isLocked
-                  ? 'Trial ended — action required'
-                  : trialDaysLeft !== null && trialDaysLeft <= 3
-                  ? `Trial ending soon — ${trialDaysLeft} day${trialDaysLeft===1?'':'s'} left`
-                  : 'Free trial active'}
-              </Text>
-            </View>
-
-            {/* Price breakdown — only show when subscribed */}
-            {user?.subscriptionStatus === 'active' && (
-              <View style={s.billingBreakdown}>
-                <View style={s.billingRow}>
-                  <Text style={s.billingLabel}>Venues</Text>
-                  <Text style={s.billingVal}>{user?.venueCount ?? 1}</Text>
-                </View>
-                <View style={s.billingRow}>
-                  <Text style={s.billingLabel}>Price per venue</Text>
-                  <Text style={s.billingVal}>$19.95 / week</Text>
-                </View>
-                <View style={[s.billingRow, {borderBottomWidth:0, paddingTop:12}]}>
-                  <Text style={[s.billingLabel, {fontSize:15, fontWeight:'700', color:'#eef0f4'}]}>Total per week</Text>
-                  <Text style={[s.billingVal, {fontSize:22, color:'#00c896'}]}>${((user?.venueCount ?? 1) * 19.95).toFixed(2)}</Text>
-                </View>
+            <View style={s.modalHeader}><Text style={s.modalTitle}>Billing OS • Premium</Text><TouchableOpacity onPress={()=>setBillingModalOpen(false)}><Ionicons name="close" size={20} color={Colors.textMuted}/></TouchableOpacity></View>
+            <View style={[s.trialCard,{marginTop:4, backgroundColor: user?.subscriptionStatus==='active'?Colors.brandSoft:isLocked?Colors.redSoft:'rgba(247,184,75,0.08)', borderColor: user?.subscriptionStatus==='active'?Colors.brand+'30':isLocked?Colors.red+'30':Colors.amber+'30'}]}>
+              <View style={s.trialHeader}>
+                <View style={{flexDirection:'row', alignItems:'center', gap:8}}><View style={[s.trialDot,{backgroundColor: user?.subscriptionStatus==='active'?Colors.brand:isLocked?Colors.red:Colors.amber}]}/><Text style={s.trialTitle}>{user?.subscriptionStatus==='active'?'Active':isLocked?'Trial Ended':`Trial • ${trialDaysLeft||14}d left`}</Text></View>
+                <Text style={s.trialVenues}>{user?.venueCount||1} venues</Text>
               </View>
-            )}
-
-            {/* CTA */}
-            <TouchableOpacity
-              style={[s.sendBtn, {marginTop:8}]}
-              onPress={()=>{ setBillingModalOpen(false); Linking.openURL('https://venuesv.com/subscribe'); }}
-            >
-              <Text style={s.sendBtnText}>
-                {user?.subscriptionStatus==='active' ? 'Manage subscription →' : 'Subscribe now →'}
-              </Text>
+              {user?.subscriptionStatus!=='active'&&!isLocked&&<><View style={s.progressTrack}><View style={[s.progressFill,{width:`${100-trialProgress}%`}]} /></View><Text style={s.progressText}>Trial progress {trialProgress}% • Started {user?.trialEndsAt? new Date(Date.now() - (14-(trialDaysLeft||0))*86400000).toLocaleDateString('en-AU') : 'recently'}</Text></>}
+              <View style={s.billingRow}>
+                <View style={s.billingItem}><Text style={s.billingVal}>${((user?.venueCount||1)*19.95).toFixed(2)}</Text><Text style={s.billingLabel}>AUD / week</Text></View>
+                <View style={s.dividerV}/>
+                <View style={s.billingItem}><Text style={s.billingVal}>{user?.venueCount||1}</Text><Text style={s.billingLabel}>venues × $19.95</Text></View>
+              </View>
+            </View>
+            <View style={{gap:8, marginTop:12}}>
+              <View style={s.featureRow}><Ionicons name="checkmark-circle" size={14} color={Colors.brand}/><Text style={s.featureText}>Unlimited tasks, issues, zones per venue</Text></View>
+              <View style={s.featureRow}><Ionicons name="checkmark-circle" size={14} color={Colors.brand}/><Text style={s.featureText}>Team chat + push notifications + RLS security</Text></View>
+              <View style={s.featureRow}><Ionicons name="checkmark-circle" size={14} color={Colors.brand}/><Text style={s.featureText}>Cancel anytime • No per-user fees • Stripe secure</Text></View>
+            </View>
+            <TouchableOpacity style={[s.trialBtn, {marginTop:16, backgroundColor: isLocked?Colors.red:Colors.brand}]} onPress={()=>{ setBillingModalOpen(false); Linking.openURL('https://venuesv.com/subscribe'); }}>
+              <Text style={[s.trialBtnText,{color: isLocked?'#fff':Colors.black}]}>{user?.subscriptionStatus==='active'?'Manage in Stripe Portal →':'Subscribe – $19.95/venue/week →'}</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[s.cancelBtn, {marginTop:10}]} onPress={()=>setBillingModalOpen(false)}>
-              <Text style={s.cancelBtnText}>Close</Text>
-            </TouchableOpacity>
+            <TouchableOpacity style={[s.cancelBtn,{marginTop:10}]} onPress={()=>setBillingModalOpen(false)}><Text style={s.cancelText}>Close</Text></TouchableOpacity>
           </View>
         </View>
       </Modal>
 
-      {/* Change Password Modal */}
+      {/* PWD MODAL */}
       <Modal visible={pwdModalOpen} transparent animationType="slide">
         <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':'height'}>
           <View style={s.modalOverlay}>
             <View style={s.modalBox}>
-              <View style={s.modalHeader}>
-                <Text style={s.modalTitle}>Change Password</Text>
-                <TouchableOpacity onPress={()=>setPwdModalOpen(false)}>
-                  <Text style={s.modalClose}>✕</Text>
-                </TouchableOpacity>
-              </View>
-
-              <Text style={s.fieldLabel}>NEW PASSWORD</Text>
-              <TextInput
-                style={s.input}
-                placeholder="At least 6 characters"
-                placeholderTextColor="#6e7a8a"
-                value={newPwd}
-                onChangeText={setNewPwd}
-                secureTextEntry
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-
-              <Text style={s.fieldLabel}>CONFIRM NEW PASSWORD</Text>
-              <TextInput
-                style={s.input}
-                placeholder="Re-enter new password"
-                placeholderTextColor="#6e7a8a"
-                value={confirmPwd}
-                onChangeText={setConfirmPwd}
-                secureTextEntry
-                autoCapitalize="none"
-                autoCorrect={false}
-                onSubmitEditing={handleChangePassword}
-              />
-
+              <View style={s.modalHeader}><Text style={s.modalTitle}>Change Password • Secure</Text><TouchableOpacity onPress={()=>setPwdModalOpen(false)}><Ionicons name="close" size={20} color={Colors.textMuted}/></TouchableOpacity></View>
+              <Text style={s.fieldLabel}>NEW PASSWORD – Min 6 chars, Supabase Auth</Text>
+              <TextInput style={s.input} placeholder="New password" placeholderTextColor={Colors.textMuted} value={newPwd} onChangeText={setNewPwd} secureTextEntry autoCapitalize="none"/>
+              <Text style={s.fieldLabel}>CONFIRM</Text>
+              <TextInput style={s.input} placeholder="Confirm" placeholderTextColor={Colors.textMuted} value={confirmPwd} onChangeText={setConfirmPwd} secureTextEntry autoCapitalize="none" onSubmitEditing={handlePwd}/>
               <View style={s.twoBtn}>
-                <TouchableOpacity style={s.cancelBtn} onPress={()=>setPwdModalOpen(false)}>
-                  <Text style={s.cancelBtnText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={s.sendBtn} onPress={handleChangePassword} disabled={changing}>
-                  {changing?<ActivityIndicator color="#000"/>:<Text style={s.sendBtnText}>Update Password</Text>}
-                </TouchableOpacity>
+                <TouchableOpacity style={s.cancelBtn} onPress={()=>setPwdModalOpen(false)}><Text style={s.cancelText}>Cancel</Text></TouchableOpacity>
+                <TouchableOpacity style={s.sendBtn} onPress={handlePwd} disabled={changing}>{changing?<ActivityIndicator color={Colors.black}/>:<Text style={s.sendText}>Update →</Text>}</TouchableOpacity>
               </View>
             </View>
           </View>
@@ -283,58 +209,61 @@ export default function MoreScreen() {
 }
 
 const s = StyleSheet.create({
-  container:    { flex:1, backgroundColor:'#080a0e' },
-  scroll:       { padding:24, gap:16 },
-  header:       { marginBottom:4 },
-  heading:      { fontSize:28, fontWeight:'800', color:'#eef0f4' },
-  userCard:     { backgroundColor:'#0f1218', borderWidth:1, borderColor:'rgba(255,255,255,.07)', borderRadius:16, padding:16, flexDirection:'row', alignItems:'center', gap:14 },
-  subCard:      { backgroundColor:'#0f1218', borderWidth:1, borderColor:'rgba(255,255,255,.07)', borderRadius:16, padding:16, gap:14 },
-  subCardTop:   { flexDirection:'row', alignItems:'center', justifyContent:'space-between' },
-  subCardTitle: { fontSize:15, fontWeight:'700', color:'#eef0f4', marginBottom:4 },
-  subCardStatus:{ fontSize:13, color:'#6e7a8a', fontWeight:'500' },
-  subBadge:     { backgroundColor:'rgba(0,200,150,.1)', borderWidth:1, borderColor:'rgba(0,200,150,.2)', borderRadius:99, paddingHorizontal:10, paddingVertical:4 },
-  subBadgeText: { fontSize:10, fontWeight:'800', color:'#00c896', letterSpacing:.5 },
-  subPriceRow:  { flexDirection:'row', backgroundColor:'#080a0e', borderRadius:12, overflow:'hidden' },
-  subPriceItem: { flex:1, padding:14, alignItems:'center' },
-  subPriceDivider:{ width:1, backgroundColor:'rgba(255,255,255,.06)' },
-  subPriceVal:  { fontSize:20, fontWeight:'900', color:'#00c896', letterSpacing:-.5 },
-  subPriceLabel:{ fontSize:11, color:'#6e7a8a', marginTop:4, fontWeight:'500' },
-  subBtn:       { backgroundColor:'rgba(0,200,150,.08)', borderWidth:1, borderColor:'rgba(0,200,150,.2)', borderRadius:10, padding:12, alignItems:'center' },
-  subBtnText:   { fontSize:13, color:'#00c896', fontWeight:'700' },
-  avatar:       { width:52, height:52, borderRadius:26, alignItems:'center', justifyContent:'center' },
-  avatarText:   { fontSize:18, fontWeight:'800' },
-  userInfo:     { flex:1 },
-  userName:     { fontSize:16, fontWeight:'700', color:'#eef0f4' },
-  userEmail:    { fontSize:12, color:'#6e7a8a', marginTop:3 },
-  roleBadge:    { paddingHorizontal:10, paddingVertical:4, borderRadius:99 },
-  roleText:     { fontSize:11, fontWeight:'700' },
-  menuList:     { backgroundColor:'#0f1218', borderWidth:1, borderColor:'rgba(255,255,255,.07)', borderRadius:16, overflow:'hidden' },
-  menuItem:     { flexDirection:'row', alignItems:'center', gap:14, padding:16, borderBottomWidth:1, borderBottomColor:'rgba(255,255,255,.05)' },
-  menuItemLast: { borderBottomWidth:0 },
-  menuIcon:     { width:40, height:40, borderRadius:10, alignItems:'center', justifyContent:'center' },
-  menuText:     { flex:1 },
-  menuLabel:    { fontSize:14, fontWeight:'600', color:'#eef0f4' },
-  menuDesc:     { fontSize:12, color:'#6e7a8a', marginTop:2 },
-  logoutBtn:    { backgroundColor:'rgba(242,78,110,.1)', borderWidth:1, borderColor:'rgba(242,78,110,.3)', borderRadius:12, padding:15, alignItems:'center', flexDirection:'row', justifyContent:'center', gap:8 },
-  logoutText:   { color:'#f24e6e', fontWeight:'700', fontSize:14 },
-  version:       { textAlign:'center', fontSize:12, color:'#3a4252' },
-  billingStatus: { flexDirection:'row', alignItems:'center', gap:8, backgroundColor:'rgba(255,255,255,.04)', borderRadius:10, padding:12, marginBottom:14 },
-  billingDot:    { width:8, height:8, borderRadius:4 },
-  billingStatusText:{ fontSize:13, color:'#eef0f4', fontWeight:'500', flex:1 },
-  billingBreakdown:{ backgroundColor:'#080a0e', borderRadius:12, overflow:'hidden', marginBottom:14 },
-  billingRow:    { flexDirection:'row', justifyContent:'space-between', alignItems:'center', padding:14, borderBottomWidth:1, borderBottomColor:'rgba(255,255,255,.06)' },
-  billingLabel:  { fontSize:13, color:'#6e7a8a' },
-  billingVal:    { fontSize:14, fontWeight:'700', color:'#eef0f4' },
-  modalOverlay: { flex:1, backgroundColor:'rgba(0,0,0,.75)', justifyContent:'flex-end' },
-  modalBox:     { backgroundColor:'#0f1218', borderTopLeftRadius:20, borderTopRightRadius:20, padding:24 },
-  modalHeader:  { flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:18 },
-  modalTitle:   { fontSize:18, fontWeight:'800', color:'#eef0f4' },
-  modalClose:   { fontSize:18, color:'#6e7a8a', padding:4 },
-  fieldLabel:   { fontSize:11, fontWeight:'600', color:'#6e7a8a', letterSpacing:.5, marginBottom:8 },
-  input:        { backgroundColor:'#161b24', borderWidth:1, borderColor:'rgba(255,255,255,.07)', borderRadius:10, padding:13, color:'#eef0f4', fontSize:14, marginBottom:14 },
-  twoBtn:       { flexDirection:'row', gap:12, marginTop:4 },
-  cancelBtn:    { flex:1, backgroundColor:'transparent', borderWidth:1, borderColor:'rgba(255,255,255,.1)', borderRadius:10, padding:13, alignItems:'center' },
-  cancelBtnText:{ color:'#6e7a8a', fontWeight:'600' },
-  sendBtn:      { flex:1, backgroundColor:'#00c896', borderRadius:10, padding:13, alignItems:'center' },
-  sendBtnText:  { color:'#000', fontWeight:'700', fontSize:14 },
+  container:{flex:1,backgroundColor: Colors.canvas},
+  scroll:{padding:16, gap:14},
+  header:{marginBottom:2},
+  heading:{fontSize:24,fontWeight:'900',color:Colors.text, letterSpacing:-0.6},
+  sub:{fontSize:12,color:Colors.textMuted, marginTop:2},
+  heroCard:{backgroundColor: Colors.surface, borderWidth:1, borderColor: Colors.border, borderRadius: Radius.xl, padding:16, gap:14},
+  heroTop:{flexDirection:'row', alignItems:'center', gap:14},
+  avatar:{width:52,height:52,borderRadius:26, borderWidth:1, alignItems:'center', justifyContent:'center'},
+  avatarText:{fontSize:18,fontWeight:'900'},
+  userName:{fontSize:16,fontWeight:'800',color:Colors.text},
+  userEmail:{fontSize:11,color:Colors.textMuted, marginTop:2},
+  verifiedBadge:{flexDirection:'row', alignItems:'center', gap:4, backgroundColor: Colors.brandSoft, borderWidth:1, borderColor: Colors.brand+'20', borderRadius:99, paddingHorizontal:8, paddingVertical:3, marginLeft:6},
+  verifiedText:{fontSize:9,fontWeight:'800',color:Colors.brand, textTransform:'uppercase'},
+  roleBadge:{paddingHorizontal:8,paddingVertical:3,borderRadius:99, borderWidth:1},
+  roleText:{fontSize:9,fontWeight:'800', textTransform:'uppercase', letterSpacing:0.5},
+  trialCard:{borderWidth:1, borderRadius: Radius.lg, padding:14, gap:10},
+  trialHeader:{flexDirection:'row', justifyContent:'space-between', alignItems:'center'},
+  trialDot:{width:8,height:8,borderRadius:4},
+  trialTitle:{fontSize:12,fontWeight:'800',color:Colors.text},
+  trialVenues:{fontSize:11,color:Colors.textMuted, fontWeight:'700'},
+  progressTrack:{height:6, backgroundColor: Colors.surfaceRaised, borderRadius:3, overflow:'hidden', borderWidth:1, borderColor: Colors.border},
+  progressFill:{height:'100%', backgroundColor: Colors.brand, borderRadius:3},
+  progressText:{fontSize:10,color:Colors.textMuted},
+  billingRow:{flexDirection:'row', alignItems:'center', gap:12, marginTop:4},
+  billingItem:{flex:1, alignItems:'center', gap:2},
+  billingVal:{fontSize:16,fontWeight:'900',color:Colors.text},
+  billingLabel:{fontSize:10,color:Colors.textMuted, fontWeight:'600'},
+  dividerV:{width:1,height:24,backgroundColor: Colors.border},
+  trialBtn:{borderRadius:10, paddingVertical:12, alignItems:'center', marginTop:4},
+  trialBtnText:{fontSize:13,fontWeight:'800'},
+  secureRow:{flexDirection:'row', alignItems:'center', gap:6, marginTop:2},
+  secureText:{fontSize:9,color:Colors.textMuted},
+  section:{gap:8},
+  sectionTitle:{fontSize:12,fontWeight:'800',color:Colors.textMuted, letterSpacing:0.6, textTransform:'uppercase', marginBottom:2},
+  menuList:{backgroundColor: Colors.surface, borderWidth:1, borderColor: Colors.border, borderRadius: Radius.lg, overflow:'hidden'},
+  menuItem:{flexDirection:'row', alignItems:'center', gap:12, padding:14, borderBottomWidth:1, borderBottomColor: Colors.border},
+  menuIcon:{width:36,height:36,borderRadius:10, borderWidth:1, alignItems:'center', justifyContent:'center'},
+  menuLabel:{fontSize:13,fontWeight:'700',color:Colors.text},
+  menuDesc:{fontSize:11,color:Colors.textMuted, marginTop:1, lineHeight:14},
+  badge:{paddingHorizontal:8,paddingVertical:3,borderRadius:99},
+  badgeText:{fontSize:9,fontWeight:'800'},
+  featureRow:{flexDirection:'row', alignItems:'center', gap:8},
+  featureText:{fontSize:12,color:Colors.textSecondary, flex:1},
+  logoutBtn:{flexDirection:'row', alignItems:'center', justifyContent:'center', gap:8, backgroundColor: Colors.redSoft, borderWidth:1, borderColor: Colors.red+'30', borderRadius: Radius.lg, padding:14},
+  logoutText:{color:Colors.red, fontWeight:'800', fontSize:13},
+  version:{textAlign:'center', fontSize:10, color: Colors.textMuted, opacity:0.6},
+  modalOverlay:{flex:1,backgroundColor:'rgba(0,0,0,0.75)',justifyContent:'flex-end'},
+  modalBox:{backgroundColor: Colors.surface, borderTopLeftRadius: Radius.xl, borderTopRightRadius: Radius.xl, padding:20, borderWidth:1, borderColor: Colors.border, maxHeight:'90%'},
+  modalHeader:{flexDirection:'row',justifyContent:'space-between',alignItems:'center', marginBottom:14},
+  modalTitle:{fontSize:16,fontWeight:'900',color:Colors.text},
+  fieldLabel:{fontSize:10,fontWeight:'800',color:Colors.textMuted, letterSpacing:0.6, textTransform:'uppercase', marginBottom:6, marginTop:10},
+  input:{backgroundColor: Colors.surfaceRaised, borderWidth:1, borderColor: Colors.border, borderRadius:10, padding:12, color: Colors.text, fontSize:13},
+  twoBtn:{flexDirection:'row', gap:10, marginTop:10},
+  cancelBtn:{flex:1, backgroundColor:'transparent', borderWidth:1, borderColor: Colors.border, borderRadius:10, padding:12, alignItems:'center'},
+  cancelText:{color: Colors.textMuted, fontWeight:'700'},
+  sendBtn:{flex:1, backgroundColor: Colors.brand, borderRadius:10, padding:12, alignItems:'center'},
+  sendText:{color: Colors.black, fontWeight:'800', fontSize:13},
 });
