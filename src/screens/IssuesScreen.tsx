@@ -11,6 +11,7 @@ import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
+import { useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { RefreshControl } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
@@ -53,6 +54,7 @@ const ZONES = ['Front Bar','Beer Garden','Restrooms — M','Restrooms — F','Ki
 
 export default function IssuesScreen() {
   const { user } = useAuth();
+  const navigation = useNavigation<any>();
   const isOwnerOrManager = user?.role === 'owner' || user?.role === 'manager';
   const canRaise   = user?.role === 'owner' || user?.role === 'manager' || user?.role === 'staff';
   const canResolve = user?.role === 'cleaner';

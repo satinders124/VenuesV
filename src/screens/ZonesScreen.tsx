@@ -34,6 +34,7 @@ const ICONS = ['🍺','🌿','🚻','🚹','🎰','🚗','🍽️','🏨','☕',
 
 export default function ZonesScreen() {
   const { user } = useAuth();
+  const navigation = useNavigation<any>();
   const isOwnerOrManager = user?.role === 'owner' || user?.role === 'manager';
   const canEdit = user?.role === 'owner' || user?.role === 'manager';
 

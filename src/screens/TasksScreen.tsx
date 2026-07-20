@@ -9,6 +9,7 @@ import { fetchVenuesForUser } from '../config/fetchVenues';
 import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from '../context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
+import { useNavigation } from '@react-navigation/native';
 import { notifyTaskCreated } from '../config/notifications';
 import { RefreshControl } from 'react-native';
 
@@ -49,6 +50,7 @@ const ICONS  = ['🧹','🪣','🚻','🗑️','🧴','🎰','🚗','🍺','🌿
 
 export default function TasksScreen() {
   const { user } = useAuth();
+  const navigation = useNavigation<any>();
   const isManager = user?.role === 'manager';
   const isCleaner = user?.role === 'cleaner';
   const [refreshing, setRefreshing] = useState(false);
