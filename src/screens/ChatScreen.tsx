@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, FlatList,
   TextInput, TouchableOpacity, KeyboardAvoidingView,
-  Platform, ActivityIndicator, RefreshControl
+  Platform, ActivityIndicator, RefreshControl, Alert
 } from 'react-native';
 import { supabase } from '../config/supabase';
 import { fetchVenuesForUser } from '../config/fetchVenues';
@@ -152,17 +152,37 @@ export default function ChatScreen() {
     setSending(true);
     try {
       const msgText = text.trim();
-      const userName = user?.name || user?.name || '';
+      const userName = user?.name || user?.email || '';
       
-      const { error } = await supabase.from('chat_messages').insert([{
+      // Try full payload with senderRole (requires migration 20260723). If PGRST204 (column missing), fallback without senderRole
+      let insertPayload: any = {
         roomId: activeRoom.id,
         text: msgText,
         senderId: user?.uid,
         senderName: userName,
-        senderRole: user?.role
-      }]);
+        senderRole: user?.role || 'staff',
+      };
+
+      let { error } = await supabase.from('chat_messages').insert([insertPayload]);
       
-      if (error) throw error;
+      if (error && (error.code === 'PGRST204' || /senderRole|senderName|senderId/i.test(error.message||''))) {
+        console.log('Chat fallback – retrying without senderRole (run migration 20260723)', error.message);
+        // Fallback: minimal columns that always exist (roomId, text) + try senderName if exists
+        const fallbackPayload: any = {
+          roomId: activeRoom.id,
+          text: msgText,
+        };
+        // Try to include senderId/senderName if possible (may exist)
+        const retry1 = await supabase.from('chat_messages').insert([{ ...fallbackPayload, senderId: user?.uid, senderName: userName }]);
+        if (retry1.error && retry1.error.code === 'PGRST204') {
+          const retry2 = await supabase.from('chat_messages').insert([fallbackPayload]);
+          if (retry2.error) throw retry2.error;
+        } else if (retry1.error) {
+          throw retry1.error;
+        }
+      } else if (error) {
+        throw error;
+      }
       
       setText('');
       markRoomRead(activeRoom.id);
@@ -182,7 +202,10 @@ export default function ChatScreen() {
           await notifyChatMessage(tokens, userName, msgText, activeRoom.name);
         }
       }
-    } catch(err){ console.error(err); }
+    } catch(err:any){ 
+      console.error('sendMessage error', err);
+      Alert.alert('Could not send', err.message || 'Message failed. Run migration 20260723_fix_chat_messages_columns.sql in Supabase if you see senderRole error.');
+    }
     setSending(false);
   };
 
