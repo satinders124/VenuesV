@@ -7,7 +7,7 @@ import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
 
-const UPDATE_STRIPE_URL = 'https://us-central1-venuev-b24c2.cloudfunctions.net/updateStripeSubscription';
+const SYNC_VENUE_COUNT_API = 'https://www.venuesv.com/api/sync-venue-count';
 
 const VENUE_TYPES = [
   { id: 'pub',         label: 'Pub / Hotel',  emoji: '🍺' },
@@ -170,12 +170,17 @@ New weekly total: $${newWeekly} AUD
 
       if (zonesError) throw zonesError;
 
-      // Sync venue count with Stripe (only if subscribed — function handles skip logic)
-      fetch(UPDATE_STRIPE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uid: isManager ? managerOwnerId : user?.uid }),
-      }).catch(() => {}); // fire and forget
+      // Sync venue count with Stripe (authenticated Vercel API)
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.access_token) {
+        fetch(SYNC_VENUE_COUNT_API, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.access_token}`,
+          },
+        }).catch(() => {}); // fire and forget
+      }
 
       Alert.alert(
         '✅ Venue Added!',

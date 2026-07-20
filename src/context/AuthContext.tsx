@@ -40,9 +40,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!user || user.role !== 'owner') return false;
     if (user.subscriptionStatus === 'active') return false;
     if (!user.trialEndsAt) return false;
-    const trialEnd = user.trialEndsAt?.toDate
-      ? user.trialEndsAt.toDate()
-      : new Date(user.trialEndsAt);
+    // Supabase returns ISO date strings; parse directly
+    const trialEnd = new Date(user.trialEndsAt);
     return new Date() > trialEnd;
   })();
 
@@ -50,9 +49,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!user || user.role !== 'owner') return null;
     if (user.subscriptionStatus === 'active') return null;
     if (!user.trialEndsAt) return null;
-    const trialEnd = user.trialEndsAt?.toDate
-      ? user.trialEndsAt.toDate()
-      : new Date(user.trialEndsAt);
+    const trialEnd = new Date(user.trialEndsAt);
     const days = Math.ceil((trialEnd.getTime() - Date.now()) / 864e5);
     return days > 0 ? days : 0;
   })();

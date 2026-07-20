@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../config/supabase';
 import { getVenueTeamMembers } from '../config/teamApi';
 import { useAuth } from './AuthContext';
@@ -23,7 +23,9 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
   const [roomUnreads, setRoomUnreads] = useState<Record<string, RoomUnread>>({});
-  const [lastRead,    setLastRead]    = useState<Record<string, Date | null>>({});
+  // Use ref instead of state to avoid infinite re-render loop
+  const lastReadRef = useRef<Record<string, Date | null>>({});
+  const getLastRead = () => lastReadRef.current;
 
   const [venues, setVenues] = useState<any[]>([]);
   const [members, setMembers] = useState<any[]>([]);
@@ -32,7 +34,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
     if (!user) return [];
 
     const getDmId = (memberName: string) => {
-      const names = [user?.name||user?.name||'', memberName].sort();
+      const names = [user?.name || user?.email || '', memberName].sort();
       return `dm_${names[0].replace(/\s/g,'_')}_${names[1].replace(/\s/g,'_')}`;
     };
 
@@ -46,7 +48,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
 
     let roomIds: string[] = [...vList.map((v: any) => v.id)];
 
-    const userName = user?.name || user?.name || '';
+    const userName = user?.name || user?.email || '';
 
     const dmPartners = mList.filter((m: any) =>
       m.name !== userName && allowedRoles.includes(m.role)
@@ -67,7 +69,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
       readAt: new Date().toISOString()
     });
     
-    setLastRead(prev => ({ ...prev, [roomId]: new Date() }));
+    lastReadRef.current = { ...lastReadRef.current, [roomId]: new Date() };
     setRoomUnreads(prev => ({
       ...prev,
       [roomId]: { ...prev[roomId], count: 0 },
@@ -132,7 +134,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
       receipts?.forEach(r => {
         newLastRead[r.roomId] = r.readAt ? new Date(r.readAt) : null;
       });
-      setLastRead(prev => ({ ...prev, ...newLastRead }));
+      lastReadRef.current = { ...lastReadRef.current, ...newLastRead };
       
       // Then get recent messages
       const { data: recentMessages } = await supabase
@@ -143,7 +145,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
         
       if (!recentMessages) return;
       
-      const userName = user?.name || user?.name || '';
+      const userName = user?.name || user?.email || '';
       const newRoomUnreads: Record<string, RoomUnread> = {};
       
       roomIds.forEach(roomId => {
@@ -151,7 +153,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
         if (roomMsgs.length === 0) return;
         
         const latest = roomMsgs[0];
-        const lr = newLastRead[roomId] || lastRead[roomId] || null;
+        const lr = newLastRead[roomId] || getLastRead()[roomId] || null;
         
         const unread = roomMsgs.filter(m => {
           if (m.senderName === userName) return false;
@@ -170,7 +172,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
     } catch(err) {
       console.log('Error updating unread', err);
     }
-  }, [user, venues, members, lastRead]);
+  }, [user, venues, members]);
 
   useEffect(() => {
     if (venues.length === 0) return;

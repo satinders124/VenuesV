@@ -6,29 +6,22 @@ import {
   Platform, Image
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { supabase } from '../config/supabase';
 import { useAuth } from '../context/AuthContext';
 
-const RESET_URL      = 'https://us-central1-venuev-b24c2.cloudfunctions.net/sendPasswordReset';
 const REMEMBER_KEY   = 'venuesv_remembered_email';
 
 function friendlyAuthError(err: any): string {
   const code = err?.code || '';
-  switch (code) {
-    case 'auth/invalid-credential':
-    case 'auth/wrong-password':
-    case 'auth/user-not-found':
-      return 'Incorrect email or password. Please try again.';
-    case 'auth/invalid-email':
-      return "That email address doesn't look right.";
-    case 'auth/user-disabled':
-      return 'This account has been disabled. Contact hello@venuesv.com.';
-    case 'auth/too-many-requests':
-      return 'Too many attempts. Please wait a moment and try again.';
-    case 'auth/network-request-failed':
-      return 'Network error. Check your connection and try again.';
-    default:
-      return 'Could not sign in. Please try again.';
-  }
+  const message = err?.message || '';
+  // Supabase sign-in errors
+  if (message.includes('Invalid login credentials')) return 'Incorrect email or password. Please try again.';
+  if (message.includes('Email not confirmed')) return 'Please verify your email address before signing in. Check your inbox.';
+  if (code === 'validation_failed' || message.includes('invalid')) return "That email address doesn't look right.";
+  if (message.includes('disabled')) return 'This account has been disabled. Contact hello@venuesv.com.';
+  if (message.includes('rate limit') || message.includes('too many')) return 'Too many attempts. Please wait a moment and try again.';
+  if (message.includes('network') || message.includes('fetch')) return 'Network error. Check your connection and try again.';
+  return 'Could not sign in. Please try again.';
 }
 
 export default function LoginScreen() {
@@ -85,12 +78,13 @@ export default function LoginScreen() {
           onPress: async () => {
             setResetting(true);
             try {
-              await fetch(RESET_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email: cleanEmail }),
+              const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+                redirectTo: 'https://venuesv.com/accept-invite',
               });
-            } catch {}
+              if (error) throw error;
+            } catch (err: any) {
+              // Supabase returns success even if email doesn't exist (security best practice)
+            }
             Alert.alert('Check your email', `If an account exists for ${cleanEmail}, a password reset link has been sent.`);
             setResetting(false);
           },

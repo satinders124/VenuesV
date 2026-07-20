@@ -133,7 +133,7 @@ export default function DashboardScreen() {
         <View style={s.header}>
           <View>
             <Text style={s.greeting}>{greeting},</Text>
-            <Text style={s.name}>{user?.name?.split(' ')[0] || user?.name?.split(' ')[0]} 👋</Text>
+            <Text style={s.name}>{user?.name?.split(' ')[0] || 'there'} 👋</Text>
           </View>
           <View style={s.dateBadge}>
             <Text style={s.dateText}>{now.toLocaleDateString('en-AU',{weekday:'short',day:'numeric',month:'short'})}</Text>
