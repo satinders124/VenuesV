@@ -141,26 +141,35 @@ export default function IssuesScreen() {
 
   const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||venueId;
 
+  // --- PREMIUM QUICK PHOTO FLOW – 2-tap ---
+  const quickTakePhoto = async (photos: string[], setPhotos: (p:string[])=>void) => {
+    if (photos.length >= 5) { Alert.alert('Max 5 photos'); return; }
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') { Alert.alert('Camera permission needed – allow in settings'); return; }
+    const r = await ImagePicker.launchCameraAsync({ allowsEditing: false, quality: 0.6, exif: false });
+    if (!r.canceled) {
+      const newUris = r.assets.map(a=>a.uri);
+      setPhotos([...photos, ...newUris].slice(0,5));
+    }
+  };
+
+  const quickPickLibrary = async (photos: string[], setPhotos: (p:string[])=>void) => {
+    if (photos.length >= 5) { Alert.alert('Max 5 photos'); return; }
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') { Alert.alert('Library permission needed'); return; }
+    const r = await ImagePicker.launchImageLibraryAsync({ allowsEditing:false, allowsMultipleSelection:true, selectionLimit:5-photos.length, quality:0.6 });
+    if (!r.canceled) {
+      setPhotos([...photos, ...r.assets.map(a=>a.uri)].slice(0,5));
+    }
+  };
+
+  // Legacy addPhoto kept for backward compat but now calls quick methods via sheet
   const addPhoto = async (photos: string[], setPhotos: (p:string[])=>void) => {
     if (photos.length >= 5) { Alert.alert('Maximum 5 photos allowed'); return; }
-    Alert.alert('Add Photo','Choose an option',[
-      { text:'📷 Take Photo', onPress: async () => {
-        const { status } = await ImagePicker.requestCameraPermissionsAsync();
-        if (status !== 'granted') { Alert.alert('Permission needed'); return; }
-        const r = await ImagePicker.launchCameraAsync({allowsEditing:true,quality:0.7});
-        if (!r.canceled) setPhotos([...photos, r.assets[0].uri]);
-      }},
-      { text:'🖼️ Choose from Library', onPress: async () => {
-        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (status !== 'granted') { Alert.alert('Permission needed'); return; }
-        const r = await ImagePicker.launchImageLibraryAsync({
-          allowsEditing:false,
-          allowsMultipleSelection:true,
-          selectionLimit:5-photos.length,
-          quality:0.7
-        });
-        if (!r.canceled) setPhotos([...photos, ...r.assets.map(a=>a.uri)].slice(0,5));
-      }},
+    // Show quick 2-button choice directly, no extra alert layer
+    Alert.alert('Add Photo Proof','2-tap quick – camera or library',[
+      { text:'📷 Camera – Quick', onPress: () => quickTakePhoto(photos, setPhotos)},
+      { text:'🖼️ Library – Multi-select', onPress: () => quickPickLibrary(photos, setPhotos)},
       { text:'Cancel', style:'cancel' },
     ]);
   };
@@ -278,23 +287,49 @@ export default function IssuesScreen() {
 
   const PhotoPicker = ({photos,setPhotos}:{photos:string[],setPhotos:(p:string[])=>void}) => (
     <View style={s.pickerWrap}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-        {photos.map((p, i) => (
-          <View key={i} style={s.pickerThumbWrap}>
-            <Image source={{uri:p}} style={s.pickerThumb}/>
-            <TouchableOpacity style={s.pickerRemove} onPress={()=>removePhoto(photos,setPhotos,i)}>
-              <Ionicons name="close-circle" size={24} color="#f24e6e"/>
+      {photos.length===0 ? (
+        <View style={s.quickPhotoBox}>
+          <Ionicons name="camera" size={28} color={Colors.textMuted} style={{opacity:0.6}}/>
+          <Text style={s.quickPhotoTitle}>Add photo proof – 2-tap quick</Text>
+          <Text style={s.quickPhotoSub}>Tap camera for instant capture, or library for multi-select. Photo proof closes audit 3x faster.</Text>
+          <View style={s.quickBtnRow}>
+            <TouchableOpacity style={[s.quickBtn, {backgroundColor: Colors.brand}]} onPress={()=>quickTakePhoto(photos,setPhotos)}>
+              <Ionicons name="camera" size={18} color={Colors.black}/><Text style={[s.quickBtnText,{color:Colors.black}]}>Camera</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.quickBtn, {backgroundColor: Colors.surfaceRaised, borderWidth:1, borderColor: Colors.border}]} onPress={()=>quickPickLibrary(photos,setPhotos)}>
+              <Ionicons name="images-outline" size={18} color={Colors.text}/><Text style={[s.quickBtnText,{color:Colors.text}]}>Library ({5-photos.length} left)</Text>
             </TouchableOpacity>
           </View>
-        ))}
-        {photos.length < 5 && (
-          <TouchableOpacity style={s.pickerAdd} onPress={()=>addPhoto(photos,setPhotos)}>
-            <Ionicons name="camera-outline" size={24} color="#6e7a8a"/>
-            <Text style={s.pickerAddText}>Add Photo</Text>
-          </TouchableOpacity>
-        )}
-      </ScrollView>
-      <Text style={s.pickerCount}>{photos.length}/5 photos added</Text>
+        </View>
+      ) : (
+        <>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{gap:8}}>
+            {photos.map((p, i) => (
+              <View key={i} style={s.pickerThumbWrap}>
+                <Image source={{uri:p}} style={s.pickerThumb}/>
+                <TouchableOpacity style={s.pickerRemove} onPress={()=>removePhoto(photos,setPhotos,i)}>
+                  <Ionicons name="close-circle" size={22} color="#fff" style={{backgroundColor:'rgba(0,0,0,0.6)',borderRadius:11}}/>
+                </TouchableOpacity>
+                <View style={s.thumbNum}><Text style={s.thumbNumText}>{i+1}</Text></View>
+              </View>
+            ))}
+            {photos.length < 5 && (
+              <>
+                <TouchableOpacity style={[s.pickerAdd, {backgroundColor: Colors.brand, borderColor: Colors.brand}]} onPress={()=>quickTakePhoto(photos,setPhotos)}>
+                  <Ionicons name="camera" size={20} color={Colors.black}/><Text style={[s.pickerAddText,{color:Colors.black, fontWeight:'800'}]}>Camera</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.pickerAdd} onPress={()=>quickPickLibrary(photos,setPhotos)}>
+                  <Ionicons name="images-outline" size={20} color={Colors.textMuted}/><Text style={s.pickerAddText}>Library</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </ScrollView>
+          <View style={{flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginTop:6}}>
+            <Text style={s.pickerCount}>{photos.length}/5 • Tap X to remove • Tap photo to retake</Text>
+            {photos.length>0&&<TouchableOpacity onPress={()=>setPhotos([])}><Text style={{fontSize:11,color:Colors.red, fontWeight:'700'}}>Clear all</Text></TouchableOpacity>}
+          </View>
+        </>
+      )}
     </View>
   );
 
@@ -692,9 +727,17 @@ searchBar: {flexDirection:'row',alignItems:'center',gap:10,backgroundColor:'#0f1
   chipTextActive:      {color:'#00c896',fontWeight:'700'},
   input:               {backgroundColor:'#161b24',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderRadius:10,padding:13,color:'#eef0f4',fontSize:14,minHeight:80,textAlignVertical:'top',marginBottom:14},
   pickerWrap:          {marginBottom:14,gap:8},
+  quickPhotoBox:       {backgroundColor:'#161b24',borderWidth:1.5,borderStyle:'dashed',borderColor:'rgba(255,255,255,.12)',borderRadius:14,padding:18,alignItems:'center',gap:8},
+  quickPhotoTitle:     {fontSize:13,fontWeight:'700',color:'#eef0f4',marginTop:4},
+  quickPhotoSub:       {fontSize:11,color:'#6e7a8a',textAlign:'center',lineHeight:15,marginBottom:4},
+  quickBtnRow:         {flexDirection:'row',gap:10,marginTop:8},
+  quickBtn:            {flexDirection:'row',alignItems:'center',gap:6,paddingHorizontal:16,paddingVertical:10,borderRadius:10},
+  quickBtnText:        {fontSize:12,fontWeight:'700'},
   pickerThumbWrap:     {width:80,height:80,borderRadius:10,marginRight:8,position:'relative'},
   pickerThumb:         {width:80,height:80,borderRadius:10},
   pickerRemove:        {position:'absolute',top:-6,right:-6},
+  thumbNum:            {position:'absolute',bottom:4,left:4,backgroundColor:'rgba(0,0,0,0.7)',borderRadius:99,minWidth:18,height:18,alignItems:'center',justifyContent:'center',paddingHorizontal:4},
+  thumbNumText:        {fontSize:10,fontWeight:'800',color:'#fff'},
   pickerAdd:           {width:80,height:80,borderRadius:10,backgroundColor:'#161b24',borderWidth:1.5,borderStyle:'dashed',borderColor:'rgba(255,255,255,.15)',alignItems:'center',justifyContent:'center',gap:4},
   pickerAddText:       {fontSize:10,color:'#6e7a8a',fontWeight:'600'},
   pickerCount:         {fontSize:11,color:'#6e7a8a'},
