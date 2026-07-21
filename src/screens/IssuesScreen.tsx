@@ -141,25 +141,38 @@ export default function IssuesScreen() {
 
   const getVenueName = (venueId:string) => venues.find(v=>v.id===venueId)?.name||venueId;
 
-  // --- PREMIUM QUICK PHOTO FLOW – 2-tap ---
+  // --- PREMIUM QUICK PHOTO FLOW – 2-tap + HARD 5 CAP ---
   const quickTakePhoto = async (photos: string[], setPhotos: (p:string[])=>void) => {
-    if (photos.length >= 5) { Alert.alert('Max 5 photos'); return; }
+    // Functional safe cap – prevents adding >5 even with stale closure or rapid taps
+    if (photos.length >= 5) { Alert.alert('Limit: 5 photos max','Photo proof limited to 5 for audit clarity. Remove one to add another.'); return; }
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== 'granted') { Alert.alert('Camera permission needed – allow in settings'); return; }
-    const r = await ImagePicker.launchCameraAsync({ allowsEditing: false, quality: 0.6, exif: false });
+    const r = await ImagePicker.launchCameraAsync({ allowsEditing: false, quality: 0.55, exif: false });
     if (!r.canceled) {
       const newUris = r.assets.map(a=>a.uri);
-      setPhotos([...photos, ...newUris].slice(0,5));
+      // Functional update ensures cap even if photos stale
+      setPhotos((prev:any) => {
+        const current = Array.isArray(prev) ? prev : photos;
+        return [...current, ...newUris].slice(0,5);
+      });
     }
   };
 
   const quickPickLibrary = async (photos: string[], setPhotos: (p:string[])=>void) => {
-    if (photos.length >= 5) { Alert.alert('Max 5 photos'); return; }
+    if (photos.length >= 5) { Alert.alert('Limit: 5 photos max','Photo proof limited to 5 for audit clarity.'); return; }
+    const remaining = 5 - photos.length;
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') { Alert.alert('Library permission needed'); return; }
-    const r = await ImagePicker.launchImageLibraryAsync({ allowsEditing:false, allowsMultipleSelection:true, selectionLimit:5-photos.length, quality:0.6 });
+    const r = await ImagePicker.launchImageLibraryAsync({ allowsEditing:false, allowsMultipleSelection:true, selectionLimit: remaining >0 ? remaining : 1, quality:0.55 });
     if (!r.canceled) {
-      setPhotos([...photos, ...r.assets.map(a=>a.uri)].slice(0,5));
+      const newUris = r.assets.map(a=>a.uri);
+      setPhotos((prev:any) => {
+        const current = Array.isArray(prev) ? prev : photos;
+        // Hard cap 5, dedupe by uri
+        const merged = [...current, ...newUris];
+        const unique = Array.from(new Set(merged));
+        return unique.slice(0,5);
+      });
     }
   };
 
@@ -411,45 +424,53 @@ export default function IssuesScreen() {
           let dateStr = 'Just now';
           if (item.createdAt) {
             const date = new Date(item.createdAt);
-            dateStr = date.toLocaleDateString('en-AU',{month:'short',day:'numeric'}) + ' ' + date.toLocaleTimeString('en-AU',{hour:'numeric',minute:'2-digit'});
+            const diff = Date.now() - date.getTime();
+            if (diff < 60000) dateStr = 'now';
+            else if (diff < 3600000) dateStr = `${Math.floor(diff/60000)}m ago`;
+            else if (diff < 86400000) dateStr = `${Math.floor(diff/3600000)}h ago`;
+            else dateStr = date.toLocaleDateString('en-AU',{month:'short',day:'numeric'});
           }
           
+          const priorityCfg = {
+            high: { bg: 'rgba(242,78,110,.12)', border: 'rgba(242,78,110,.25)', text: '#f24e6e', dot: '#f24e6e' },
+            medium: { bg: 'rgba(245,166,35,.12)', border: 'rgba(245,166,35,.25)', text: '#f5a623', dot: '#f5a623' },
+            low: { bg: 'rgba(0,200,150,.1)', border: 'rgba(0,200,150,.2)', text: '#00c896', dot: '#00c896' },
+          }[item.priority] || { bg: 'rgba(0,200,150,.1)', border: 'rgba(0,200,150,.2)', text: '#00c896', dot: '#00c896' };
+
           return (
-            <View style={[s.issueCard, item.status==='resolved'&&s.issueResolved]}>
+            <View style={[s.issueCard, item.status==='resolved'&&s.issueResolved, { borderLeftColor: priorityCfg.dot, borderLeftWidth: 3 }]}>
               <View style={s.issueTop}>
-                {item.status==='open' ? (
-                  <View style={[s.priorityBadge,{backgroundColor:`${PRIORITY_COLOR[item.priority]}22`}]}>
-                    <Text style={[s.priorityText,{color:PRIORITY_COLOR[item.priority]}]}>{item.priority.toUpperCase()}</Text>
+                <View style={s.issueTopLeft}>
+                  {venues.length > 1 && <View style={s.venueChip}><Text style={s.venueChipText}>🏢 {getVenueName(item.venueId)}</Text></View>}
+                  <View style={[s.priorityBadge, {backgroundColor: priorityCfg.bg, borderColor: priorityCfg.border, borderWidth:1}]}>
+                    <View style={[s.priorityDot,{backgroundColor: priorityCfg.dot}]}/>
+                    <Text style={[s.priorityText,{color: priorityCfg.text}]}>{item.priority.toUpperCase()}</Text>
                   </View>
-                ) : (
-                  <View style={s.resolvedBadge}>
-                    <Ionicons name="checkmark" size={12} color="#00c896"/>
-                    <Text style={s.resolvedBadgeText}>RESOLVED</Text>
-                  </View>
-                )}
-                {venues.length > 1 && <Text style={s.issueVenueTag}>🏢 {getVenueName(item.venueId)}</Text>}
+                  {item.status==='resolved' ? (
+                    <View style={s.resolvedBadge}><Ionicons name="checkmark" size={10} color={Colors.brand}/><Text style={s.resolvedBadgeText}>RESOLVED</Text></View>
+                  ) : (
+                    <View style={s.openBadge}><View style={s.openDot}/><Text style={s.openText}>OPEN</Text></View>
+                  )}
+                </View>
                 <Text style={s.issueDate}>{dateStr}</Text>
               </View>
 
               <Text style={s.issueTitle}>{item.title}</Text>
-              <View style={s.issueMeta}>
-                <Ionicons name="location-outline" size={12} color="#6e7a8a"/>
-                <Text style={{fontSize:12,color:'#6e7a8a',marginLeft:4}}>
-                  {item.zone}  ·  Reported by {item.by}
-                </Text>
+
+              <View style={s.metaRow}>
+                <View style={s.metaChip}><Ionicons name="location-outline" size={12} color={Colors.textMuted}/><Text style={s.metaText}>{item.zone}</Text></View>
+                <View style={s.metaChip}><Ionicons name="person-outline" size={12} color={Colors.textMuted}/><Text style={s.metaText}>{item.by}</Text></View>
+                {item.photoUrls && item.photoUrls.length>0 && <View style={s.metaChip}><Ionicons name="camera-outline" size={12} color={Colors.brand}/><Text style={[s.metaText,{color:Colors.brand}]}>{item.photoUrls.length} photo{item.photoUrls.length>1?'s':''}</Text></View>}
               </View>
 
               {item.photoUrls && item.photoUrls.length > 0 && (
                 <View style={s.photoSection}>
-                  <View style={s.photoLabelRow}>
-                    <Ionicons name="camera-outline" size={12} color="#6e7a8a"/>
-                    <Text style={[s.photoLabel,{color:'#6e7a8a'}]}>Issue Photos</Text>
-                  </View>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.photoStrip}>
+                  <View style={s.photoHeader}><Text style={s.photoLabel}>📸 Proof • {item.photoUrls.length}/5</Text><Text style={s.photoHint}>Tap to expand</Text></View>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{gap:8}} style={s.photoStrip}>
                     {item.photoUrls.map((url, idx) => (
                       <TouchableOpacity key={idx} style={s.photoThumbWrap} onPress={()=>{setViewerPhotos(item.photoUrls||[]);setViewerIndex(idx);}}>
-                        <Image source={{uri:url}} style={s.photoThumb}/>
-                        <View style={s.photoThumbOverlay}><Ionicons name="expand" size={12} color="#fff"/></View>
+                        <Image source={{uri:url}} style={s.photoThumbLarge}/>
+                        <View style={s.photoThumbOverlay}><Ionicons name="expand-outline" size={14} color="#fff"/></View>
                       </TouchableOpacity>
                     ))}
                   </ScrollView>
@@ -459,44 +480,34 @@ export default function IssuesScreen() {
               {item.status==='resolved' && (
                 <View style={s.resolvedSection}>
                   <View style={s.resolvedSectionHeader}>
-                    <Ionicons name="build" size={14} color="#00c896"/>
-                    <Text style={s.resolvedSectionTitle}>Resolution Details</Text>
+                    <View style={s.resolvedIcon}><Ionicons name="checkmark-done" size={14} color={Colors.brand}/></View>
+                    <Text style={s.resolvedSectionTitle}>Resolved • Proof</Text>
+                    <Text style={s.resolvedBy}>by {item.resolvedBy} • {item.resolvedAt? new Date(item.resolvedAt).toLocaleDateString('en-AU') : ''}</Text>
                   </View>
-                  {!!item.resolvedNote && (
-                    <View style={s.resolveNoteWrap}>
-                      <Text style={s.resolveNote}>"{item.resolvedNote}"</Text>
-                    </View>
-                  )}
+                  {!!item.resolvedNote && <Text style={s.resolveNote}>"{item.resolvedNote}"</Text>}
                   {item.resolvedPhotoUrls && item.resolvedPhotoUrls.length > 0 && (
-                    <View style={s.photoSection}>
-                      <View style={s.photoLabelRow}>
-                        <Ionicons name="camera-outline" size={12} color="#00c896"/>
-                        <Text style={[s.photoLabel,{color:'#00c896'}]}>Proof Photos</Text>
-                      </View>
-                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.photoStrip}>
-                        {item.resolvedPhotoUrls.map((url, idx) => (
-                          <TouchableOpacity key={idx} style={s.photoThumbWrap} onPress={()=>{setViewerPhotos(item.resolvedPhotoUrls||[]);setViewerIndex(idx);}}>
-                            <Image source={{uri:url}} style={s.photoThumb}/>
-                            <View style={s.photoThumbOverlay}><Ionicons name="expand" size={12} color="#fff"/></View>
-                          </TouchableOpacity>
-                        ))}
-                      </ScrollView>
-                    </View>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{gap:8}} style={s.photoStrip}>
+                      {item.resolvedPhotoUrls.map((url, idx) => (
+                        <TouchableOpacity key={idx} style={s.photoThumbWrap} onPress={()=>{setViewerPhotos(item.resolvedPhotoUrls||[]);setViewerIndex(idx);}}>
+                          <Image source={{uri:url}} style={s.photoThumbLarge}/>
+                          <View style={[s.photoThumbOverlay,{backgroundColor:'rgba(0,200,150,0.7)'}]}><Ionicons name="shield-checkmark" size={14} color="#fff"/></View>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
                   )}
-                  <Text style={{fontSize:10,color:'#6e7a8a',marginTop:4}}>Resolved by {item.resolvedBy}</Text>
                 </View>
               )}
 
               {canResolve && item.status==='open' && (
                 <TouchableOpacity style={s.resolveBtn} onPress={()=>{setResolveIssueId(item.id);setResolveModal(true);}}>
-                  <Ionicons name="checkmark-circle-outline" size={16} color="#00c896"/>
-                  <Text style={s.resolveBtnText}>Mark Resolved</Text>
+                  <Ionicons name="camera-outline" size={16} color={Colors.black}/><Text style={s.resolveBtnText}>Resolve with Photo Proof →</Text>
                 </TouchableOpacity>
               )}
             </View>
           );
         }}
       />
+
 
       <Modal visible={viewerPhotos.length > 0} transparent animationType="fade">
         <View style={s.viewerOverlay}>
@@ -657,54 +668,66 @@ export default function IssuesScreen() {
 }
 
 const s = StyleSheet.create({
-  container:           {flex:1,backgroundColor:'#080a0e'},
-  header:              {flexDirection:'row',justifyContent:'space-between',alignItems:'center',padding:24,paddingBottom:12},
-  heading:             {fontSize:28,fontWeight:'800',color:'#eef0f4'},
-  sub:                 {fontSize:13,color:'#6e7a8a',marginTop:2},
-  raiseBtn:            {flexDirection:'row',alignItems:'center',gap:5,backgroundColor:'#00c896',paddingHorizontal:14,paddingVertical:9,borderRadius:9},
-  raiseBtnText:        {color:'#000',fontWeight:'700',fontSize:13},
-  venueTabsWrap:       {height:44,marginBottom:0},
-  venueTabs:           {paddingHorizontal:24,gap:8,alignItems:'center'},
-  venueTab:            {height:34,paddingHorizontal:14,borderRadius:99,backgroundColor:'#161b24',borderWidth:1,borderColor:'rgba(255,255,255,.07)',justifyContent:'center'},
-  venueTabActive:      {backgroundColor:'#00c896',borderColor:'#00c896'},
-  venueTabText:        {fontSize:12,color:'#6e7a8a',fontWeight:'600'},
-  venueTabTextActive:  {color:'#000'},
-  toggleRow:           {flexDirection:'row',paddingHorizontal:24,gap:10,marginTop:12,marginBottom:12},
-  toggleBtn:           {flex:1,backgroundColor:'#161b24',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderRadius:10,padding:12,alignItems:'center'},
-  toggleBtnRed:        {borderColor:'rgba(242,78,110,.4)',backgroundColor:'rgba(242,78,110,.08)'},
-  toggleBtnGreen:      {borderColor:'rgba(0,200,150,.4)',backgroundColor:'rgba(0,200,150,.08)'},
-  toggleText:          {fontSize:13,color:'#6e7a8a',fontWeight:'700'},
-searchBar: {flexDirection:'row',alignItems:'center',gap:10,backgroundColor:'#0f1218',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderRadius:10,padding:12,marginHorizontal:0,marginBottom:12},  searchInput:         {flex:1,color:'#eef0f4',fontSize:14,padding:0},
-  notice:              {marginHorizontal:24,marginBottom:12,backgroundColor:'rgba(44,126,247,.1)',borderWidth:1,borderColor:'rgba(44,126,247,.2)',borderRadius:10,padding:12},
-  noticeText:          {fontSize:12,color:'#2c7ef7'},
-  list:                {paddingHorizontal:24,paddingBottom:20,gap:12},
+  container:           {flex:1,backgroundColor:Colors.canvas},
+  header:              {flexDirection:'row',justifyContent:'space-between',alignItems:'center',padding:20,paddingBottom:12},
+  heading:             {fontSize:22,fontWeight:'900',color:Colors.text, letterSpacing:-0.4},
+  sub:                 {fontSize:11,color:Colors.textMuted,marginTop:2, fontWeight:'600'},
+  raiseBtn:            {flexDirection:'row',alignItems:'center',gap:6,backgroundColor:Colors.brand,paddingHorizontal:14,paddingVertical:10,borderRadius:10},
+  raiseBtnText:        {color:Colors.black,fontWeight:'800',fontSize:12},
+  venueTabsWrap:       {height:40,marginBottom:8},
+  venueTabs:           {paddingHorizontal:20,gap:8,alignItems:'center'},
+  venueTab:            {height:32,paddingHorizontal:14,borderRadius:99,backgroundColor:Colors.surfaceRaised,borderWidth:1,borderColor:Colors.border,justifyContent:'center'},
+  venueTabActive:      {backgroundColor:Colors.brand,borderColor:Colors.brand},
+  venueTabText:        {fontSize:11,color:Colors.textMuted,fontWeight:'600'},
+  venueTabTextActive:  {color:Colors.black, fontWeight:'800'},
+  toggleRow:           {flexDirection:'row',paddingHorizontal:20,gap:8,marginTop:8,marginBottom:12},
+  toggleBtn:           {flex:1,backgroundColor:Colors.surfaceRaised,borderWidth:1,borderColor:Colors.border,borderRadius:10,padding:10,alignItems:'center'},
+  toggleBtnRed:        {borderColor:Colors.red+'40',backgroundColor:Colors.redSoft},
+  toggleBtnGreen:      {borderColor:Colors.brand+'40',backgroundColor:Colors.brandSoft},
+  toggleText:          {fontSize:11,color:Colors.textMuted,fontWeight:'700', letterSpacing:0.5, textTransform:'uppercase'},
+  searchBar:           {flexDirection:'row',alignItems:'center',gap:10,backgroundColor:Colors.surface,borderWidth:1,borderColor:Colors.border,borderRadius:12,padding:12,marginBottom:12},
+  searchInput:         {flex:1,color:Colors.text,fontSize:13,padding:0},
+  notice:              {marginHorizontal:20,marginBottom:12,backgroundColor:Colors.blue+'12',borderWidth:1,borderColor:Colors.blue+'25',borderRadius:12,padding:12},
+  noticeText:          {fontSize:11,color:Colors.blue, lineHeight:16},
+  list:                {paddingHorizontal:16,paddingBottom:20,gap:12},
   emptyWrap:           {alignItems:'center',paddingTop:60,gap:12},
-  emptyText:           {fontSize:15,color:'#6e7a8a',fontWeight:'600'},
-  issueCard:           {backgroundColor:'#0f1218',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderLeftWidth:4,borderRadius:14,padding:16,gap:10},
-  issueResolved:       {opacity:0.75},
-  issueTop:            {flexDirection:'row',alignItems:'center',gap:8,flexWrap:'wrap'},
-  priorityBadge:       {paddingHorizontal:8,paddingVertical:3,borderRadius:99},
-  priorityText:        {fontSize:10,fontWeight:'700'},
-  resolvedBadge:       {flexDirection:'row',alignItems:'center',gap:4,backgroundColor:'rgba(0,200,150,.1)',paddingHorizontal:8,paddingVertical:3,borderRadius:99},
-  resolvedBadgeText:   {fontSize:10,fontWeight:'700',color:'#00c896'},
-  issueVenueTag:       {fontSize:11,color:'#3a4252'},
-  issueDate:           {fontSize:11,color:'#3a4252',marginLeft:'auto'},
-  issueTitle:          {fontSize:14,fontWeight:'700',color:'#eef0f4',lineHeight:20},
-  issueMeta:           {fontSize:12,color:'#6e7a8a',flexDirection:'row',alignItems:'center'},
-  photoSection:        {gap:6},
-  photoLabel:          {fontSize:11,fontWeight:'600'},
-  photoLabelRow:       {flexDirection:'row',alignItems:'center',gap:4},
-  photoStrip:          {marginTop:4},
-  photoThumbWrap:      {marginRight:8,borderRadius:8,overflow:'hidden',position:'relative'},
-  photoThumb:          {width:100,height:80,borderRadius:8},
-  photoThumbOverlay:   {position:'absolute',bottom:4,right:4,backgroundColor:'rgba(0,0,0,.5)',borderRadius:99,padding:3},
-  resolvedSection:     {backgroundColor:'rgba(0,200,150,.06)',borderRadius:10,padding:12,gap:8,borderWidth:1,borderColor:'rgba(0,200,150,.15)'},
-  resolvedSectionHeader:{flexDirection:'row',alignItems:'center',gap:6},
-  resolvedSectionTitle:{fontSize:12,fontWeight:'700',color:'#00c896'},
-  resolveNoteWrap:     {flexDirection:'row',alignItems:'flex-start',gap:6},
-  resolveNote:         {fontSize:12,color:'#eef0f4',flex:1,fontStyle:'italic',lineHeight:18},
-  resolveBtn:          {flexDirection:'row',alignItems:'center',justifyContent:'center',gap:6,backgroundColor:'rgba(0,200,150,.1)',borderWidth:1,borderColor:'rgba(0,200,150,.3)',borderRadius:9,padding:12,marginTop:4},
-  resolveBtnText:      {color:'#00c896',fontWeight:'700',fontSize:13},
+  emptyText:           {fontSize:14,color:Colors.textMuted,fontWeight:'600'},
+  // Premium Issue Card – clear hierarchy
+  issueCard:           {backgroundColor:Colors.surface,borderWidth:1,borderColor:Colors.border,borderRadius:Radius.lg,padding:14,gap:10},
+  issueResolved:       {opacity:0.7, borderLeftColor: Colors.brand},
+  issueTop:            {flexDirection:'row',justifyContent:'space-between',alignItems:'center'},
+  issueTopLeft:        {flexDirection:'row',alignItems:'center',gap:6,flex:1,flexWrap:'wrap'},
+  venueChip:           {backgroundColor:Colors.surfaceRaised,borderWidth:1,borderColor:Colors.border,borderRadius:99,paddingHorizontal:8,paddingVertical:3},
+  venueChipText:       {fontSize:10,fontWeight:'600',color:Colors.textMuted},
+  priorityBadge:       {flexDirection:'row',alignItems:'center',gap:4,paddingHorizontal:8,paddingVertical:4,borderRadius:99},
+  priorityDot:         {width:6,height:6,borderRadius:3},
+  priorityText:        {fontSize:9,fontWeight:'900',letterSpacing:0.5},
+  resolvedBadge:       {flexDirection:'row',alignItems:'center',gap:4,backgroundColor:Colors.brandSoft,borderWidth:1,borderColor:Colors.brand+'30',paddingHorizontal:8,paddingVertical:3,borderRadius:99},
+  resolvedBadgeText:   {fontSize:9,fontWeight:'800',color:Colors.brand, letterSpacing:0.5},
+  openBadge:           {flexDirection:'row',alignItems:'center',gap:4,backgroundColor:Colors.surfaceRaised,borderWidth:1,borderColor:Colors.border,paddingHorizontal:8,paddingVertical:3,borderRadius:99},
+  openDot:             {width:6,height:6,borderRadius:3,backgroundColor:Colors.amber},
+  openText:            {fontSize:9,fontWeight:'800',color:Colors.textMuted, letterSpacing:0.5},
+  issueDate:           {fontSize:10,color:Colors.textMuted, fontWeight:'600'},
+  issueTitle:          {fontSize:15,fontWeight:'800',color:Colors.text,lineHeight:20, letterSpacing:-0.2},
+  metaRow:             {flexDirection:'row',gap:8,flexWrap:'wrap'},
+  metaChip:            {flexDirection:'row',alignItems:'center',gap:4,backgroundColor:Colors.surfaceRaised,borderWidth:1,borderColor:Colors.border,borderRadius:99,paddingHorizontal:8,paddingVertical:4},
+  metaText:            {fontSize:11,color:Colors.textMuted, fontWeight:'500'},
+  photoSection:        {gap:8, marginTop:4},
+  photoHeader:         {flexDirection:'row',justifyContent:'space-between',alignItems:'center'},
+  photoLabel:          {fontSize:10,fontWeight:'800',letterSpacing:0.6,textTransform:'uppercase',color:Colors.textMuted},
+  photoHint:           {fontSize:10,color:Colors.textMuted},
+  photoStrip:          {marginTop:2},
+  photoThumbWrap:      {borderRadius:10,overflow:'hidden',position:'relative',borderWidth:1,borderColor:Colors.border},
+  photoThumbLarge:     {width:110,height:84,borderRadius:10},
+  photoThumbOverlay:   {position:'absolute',bottom:6,right:6,backgroundColor:'rgba(0,0,0,.6)',borderRadius:99,padding:4},
+  resolvedSection:     {backgroundColor:Colors.brandSoft,borderRadius:12,padding:12,gap:8,borderWidth:1,borderColor:Colors.brand+'20'},
+  resolvedIcon:        {width:24,height:24,borderRadius:12,backgroundColor:Colors.brand+'20',borderWidth:1,borderColor:Colors.brand+'30',alignItems:'center',justifyContent:'center'},
+  resolvedSectionHeader:{flexDirection:'row',alignItems:'center',gap:8},
+  resolvedSectionTitle:{fontSize:11,fontWeight:'800',color:Colors.brand, letterSpacing:0.5, textTransform:'uppercase'},
+  resolvedBy:          {fontSize:10,color:Colors.textMuted, marginLeft:'auto'},
+  resolveNote:         {fontSize:12,color:Colors.text, fontStyle:'italic', lineHeight:16, backgroundColor:Colors.surface, borderWidth:1, borderColor:Colors.border, borderRadius:8, padding:10},
+  resolveBtn:          {flexDirection:'row',alignItems:'center',justifyContent:'center',gap:8,backgroundColor:Colors.brand,borderRadius:10,padding:12,marginTop:2},
+  resolveBtnText:      {color:Colors.black,fontWeight:'800',fontSize:12, letterSpacing:0.3},
   viewerOverlay:       {flex:1,backgroundColor:'rgba(0,0,0,.97)',justifyContent:'center',alignItems:'center'},
   viewerClose:         {position:'absolute',top:50,right:20,zIndex:10,backgroundColor:'rgba(255,255,255,.1)',borderRadius:20,padding:8},
   viewerImage:         {width:SCREEN_WIDTH,height:SCREEN_WIDTH*1.3},
@@ -713,37 +736,37 @@ searchBar: {flexDirection:'row',alignItems:'center',gap:10,backgroundColor:'#0f1
   viewerDownload:      {position:'absolute',bottom:48,alignSelf:'center',flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'rgba(255,255,255,.15)',paddingHorizontal:20,paddingVertical:12,borderRadius:99,borderWidth:1,borderColor:'rgba(255,255,255,.2)'},
   viewerDownloadText:  {color:'#fff',fontSize:14,fontWeight:'600'},
   modalOverlay:        {flex:1,justifyContent:'flex-end'},
-  modalBox:            {backgroundColor:'#0f1218',borderTopLeftRadius:20,borderTopRightRadius:20,padding:24,maxHeight:'90%'},
-  modalHeader:         {flexDirection:'row',justifyContent:'space-between',alignItems:'center',marginBottom:12},
-  modalTitle:          {fontSize:18,fontWeight:'800',color:'#eef0f4'},
-  modalClose:          {fontSize:18,color:'#6e7a8a',padding:4},
-  inputLabel:          {fontSize:11,fontWeight:'600',color:'#6e7a8a',letterSpacing:.5,marginBottom:8},
-  threeRow:            {flexDirection:'row',gap:8,marginBottom:14},
-  priorityOption:      {flex:1,backgroundColor:'#161b24',borderWidth:1.5,borderColor:'rgba(255,255,255,.07)',borderRadius:10,padding:10,alignItems:'center'},
-  priorityOptionText:  {fontSize:12,color:'#6e7a8a',fontWeight:'600'},
-  chip:                {backgroundColor:'#161b24',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderRadius:99,paddingHorizontal:14,paddingVertical:7,marginRight:8},
-  chipActive:          {borderColor:'#00c896',backgroundColor:'rgba(0,200,150,.1)'},
-  chipText:            {fontSize:12,color:'#6e7a8a',fontWeight:'500'},
-  chipTextActive:      {color:'#00c896',fontWeight:'700'},
-  input:               {backgroundColor:'#161b24',borderWidth:1,borderColor:'rgba(255,255,255,.07)',borderRadius:10,padding:13,color:'#eef0f4',fontSize:14,minHeight:80,textAlignVertical:'top',marginBottom:14},
-  pickerWrap:          {marginBottom:14,gap:8},
-  quickPhotoBox:       {backgroundColor:'#161b24',borderWidth:1.5,borderStyle:'dashed',borderColor:'rgba(255,255,255,.12)',borderRadius:14,padding:18,alignItems:'center',gap:8},
-  quickPhotoTitle:     {fontSize:13,fontWeight:'700',color:'#eef0f4',marginTop:4},
-  quickPhotoSub:       {fontSize:11,color:'#6e7a8a',textAlign:'center',lineHeight:15,marginBottom:4},
+  modalBox:            {backgroundColor:Colors.surface,borderTopLeftRadius:Radius.xl,borderTopRightRadius:Radius.xl,padding:20,maxHeight:'90%', borderWidth:1, borderColor:Colors.border},
+  modalHeader:         {flexDirection:'row',justifyContent:'space-between',alignItems:'center',marginBottom:14},
+  modalTitle:          {fontSize:16,fontWeight:'900',color:Colors.text, letterSpacing:-0.3},
+  modalClose:          {fontSize:16,color:Colors.textMuted,padding:6, backgroundColor:Colors.surfaceRaised, borderRadius:8, borderWidth:1, borderColor:Colors.border, width:32, height:32, textAlign:'center'},
+  inputLabel:          {fontSize:10,fontWeight:'800',color:Colors.textMuted,letterSpacing:0.6,textTransform:'uppercase',marginBottom:8, marginTop:8},
+  threeRow:            {flexDirection:'row',gap:8,marginBottom:12},
+  priorityOption:      {flex:1,backgroundColor:Colors.surfaceRaised,borderWidth:1.5,borderColor:Colors.border,borderRadius:10,padding:10,alignItems:'center'},
+  priorityOptionText:  {fontSize:10,color:Colors.textMuted,fontWeight:'800', letterSpacing:0.5},
+  chip:                {backgroundColor:Colors.surfaceRaised,borderWidth:1,borderColor:Colors.border,borderRadius:99,paddingHorizontal:12,paddingVertical:7,marginRight:6},
+  chipActive:          {borderColor:Colors.brand,backgroundColor:Colors.brandSoft},
+  chipText:            {fontSize:11,color:Colors.textMuted,fontWeight:'500'},
+  chipTextActive:      {color:Colors.brand,fontWeight:'800'},
+  input:               {backgroundColor:Colors.surfaceRaised,borderWidth:1,borderColor:Colors.border,borderRadius:10,padding:12,color:Colors.text,fontSize:13,minHeight:48,textAlignVertical:'top',marginBottom:12},
+  pickerWrap:          {marginBottom:12,gap:8},
+  quickPhotoBox:       {backgroundColor:Colors.surfaceRaised,borderWidth:1.5,borderStyle:'dashed',borderColor:Colors.border,borderRadius:14,padding:16,alignItems:'center',gap:6},
+  quickPhotoTitle:     {fontSize:13,fontWeight:'800',color:Colors.text,marginTop:4},
+  quickPhotoSub:       {fontSize:11,color:Colors.textMuted,textAlign:'center',lineHeight:15},
   quickBtnRow:         {flexDirection:'row',gap:10,marginTop:8},
-  quickBtn:            {flexDirection:'row',alignItems:'center',gap:6,paddingHorizontal:16,paddingVertical:10,borderRadius:10},
-  quickBtnText:        {fontSize:12,fontWeight:'700'},
-  pickerThumbWrap:     {width:80,height:80,borderRadius:10,marginRight:8,position:'relative'},
+  quickBtn:            {flexDirection:'row',alignItems:'center',gap:6,paddingHorizontal:14,paddingVertical:10,borderRadius:10},
+  quickBtnText:        {fontSize:11,fontWeight:'800'},
+  pickerThumbWrap:     {width:80,height:80,borderRadius:10,marginRight:0,position:'relative', borderWidth:1, borderColor:Colors.border},
   pickerThumb:         {width:80,height:80,borderRadius:10},
-  pickerRemove:        {position:'absolute',top:-6,right:-6},
-  thumbNum:            {position:'absolute',bottom:4,left:4,backgroundColor:'rgba(0,0,0,0.7)',borderRadius:99,minWidth:18,height:18,alignItems:'center',justifyContent:'center',paddingHorizontal:4},
-  thumbNumText:        {fontSize:10,fontWeight:'800',color:'#fff'},
-  pickerAdd:           {width:80,height:80,borderRadius:10,backgroundColor:'#161b24',borderWidth:1.5,borderStyle:'dashed',borderColor:'rgba(255,255,255,.15)',alignItems:'center',justifyContent:'center',gap:4},
-  pickerAddText:       {fontSize:10,color:'#6e7a8a',fontWeight:'600'},
-  pickerCount:         {fontSize:11,color:'#6e7a8a'},
-  twoBtn:              {flexDirection:'row',gap:12},
-  cancelBtn:           {flex:1,backgroundColor:'transparent',borderWidth:1,borderColor:'rgba(255,255,255,.1)',borderRadius:10,padding:13,alignItems:'center'},
-  cancelBtnText:       {color:'#6e7a8a',fontWeight:'600'},
-  submitBtn:           {flex:1,backgroundColor:'#00c896',borderRadius:10,padding:13,alignItems:'center'},
-  submitBtnText:       {color:'#000',fontWeight:'700',fontSize:14},
+  pickerRemove:        {position:'absolute',top:-6,right:-6, zIndex:2},
+  thumbNum:            {position:'absolute',bottom:4,left:4,backgroundColor:'rgba(0,0,0,0.75)',borderRadius:99,minWidth:16,height:16,alignItems:'center',justifyContent:'center',paddingHorizontal:4},
+  thumbNumText:        {fontSize:9,fontWeight:'900',color:'#fff'},
+  pickerAdd:           {width:80,height:80,borderRadius:10,backgroundColor:Colors.surfaceRaised,borderWidth:1.5,borderStyle:'dashed',borderColor:Colors.border,alignItems:'center',justifyContent:'center',gap:4},
+  pickerAddText:       {fontSize:10,color:Colors.textMuted,fontWeight:'600'},
+  pickerCount:         {fontSize:10,color:Colors.textMuted},
+  twoBtn:              {flexDirection:'row',gap:10, marginTop:8},
+  cancelBtn:           {flex:1,backgroundColor:'transparent',borderWidth:1,borderColor:Colors.border,borderRadius:10,padding:12,alignItems:'center'},
+  cancelBtnText:       {color:Colors.textMuted,fontWeight:'700', fontSize:12},
+  submitBtn:           {flex:1,backgroundColor:Colors.brand,borderRadius:10,padding:12,alignItems:'center'},
+  submitBtnText:       {color:Colors.black,fontWeight:'900',fontSize:12, letterSpacing:0.3},
 });
